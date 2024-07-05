@@ -9,7 +9,7 @@ export async function startLanggraphResearch(newQuestion, report_source) {
     const host = getHost({purpose: 'langgraph-gui'});
   
     // Add your authentication token here
-    const authToken = process.env.LANGCHAIN_API_KEY;
+    const authToken = 'REMOVED_HISTORICAL_LANGSMITH_KEY';
 
     const client = new Client({
         apiUrl: host,
