@@ -2,12 +2,12 @@ import { Client } from "@langchain/langgraph-sdk";
 import { task } from '../../config/task';
 import { getHost } from '../../helpers/getHost';
 
-export async function startLanggraphResearch(newQuestion, report_source) {
+export async function startLanggraphResearch(newQuestion, report_source, langgraphHostUrl) {
     // Update the task query with the new question
     task.task.query = newQuestion;
     task.task.source = report_source;
-    const host = getHost({purpose: 'langgraph-gui'});
-  
+    const host = langgraphHostUrl;
+    
     // Add your authentication token here
     const authToken = 'REMOVED_HISTORICAL_LANGSMITH_KEY';
 
