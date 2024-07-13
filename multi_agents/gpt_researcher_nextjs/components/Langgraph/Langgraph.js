@@ -7,7 +7,7 @@ export async function startLanggraphResearch(newQuestion, report_source, langgra
     task.task.source = report_source;
     const host = langgraphHostUrl;
     
-    // Add your authentication token here
+    // Add your Langgraph Cloud Authentication token here
     const authToken = 'REMOVED_HISTORICAL_LANGSMITH_KEY';
 
     const client = new Client({
