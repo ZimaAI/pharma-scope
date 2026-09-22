@@ -2,8 +2,13 @@
 
 ## 1. 仓库与分支
 
-本项目基于 GPT Researcher，保留上游提交历史与许可证文件。
-初始化基线：`6f998577d547b1e54ec662dac63583aa11e3b84b`。
+本项目基于 GPT Researcher，保留清理后的上游提交历史与许可证文件。
+原始源码基线：`6f998577d547b1e54ec662dac63583aa11e3b84b`。
+
+首次推送时，GitHub 检测到上游旧提交中的 LangSmith 密钥并阻止推送。
+初始化使用 `git-filter-repo` 将该密钥从 `main` 的历史中替换掉；
+已验证清理前后当前源码树完全一致，但受影响的历史提交哈希发生变化。
+`upstream/main` 保留原始引用供比较，后续采用下文的挑选提交方式同步。
 
 | 项目 | 配置 |
 | --- | --- |
@@ -22,11 +27,12 @@
 ### 后端及内置简易页面
 
 Python 版本要求为 3.11 或更高，项目 `.python-version` 使用 3.11。
+本机已检测到 Python 3.12，可用下面的命令创建环境。
 在项目根目录执行以下命令；虚拟环境只需首次创建：
 
 ```powershell
 cd D:\Develop\Projects\pharma-scope
-py -3.11 -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
@@ -156,23 +162,30 @@ git push origin main
 仓库保留上游 GitHub Actions：`tests.yml` 会在推送 `main` 时运行；
 上游 AWS 部署工作流主要针对 `master`，尚未为本项目配置部署。
 
-## 5. 同步上游更新
+## 5. 挑选上游更新
 
-先提交当前修改，确保 `git status` 干净，然后执行：
+由于上游原始历史中包含触发推送保护的密钥，直接合并 `upstream/main`
+会再次引入这些旧提交。这里采用 `cherry-pick`，只引入需要的代码改动。
+先提交当前修改，确保 `git status` 干净，再查看初始化基线之后的更新：
 
 ```powershell
 git switch main
 git pull --ff-only origin main
 git fetch upstream
-git log --oneline main..upstream/main
-git merge upstream/main
+git log --oneline 6f998577d547b1e54ec662dac63583aa11e3b84b..upstream/main
+# 查看并选择需要的非合并提交
+git show <上游提交哈希>
+git cherry-pick <上游提交哈希>
 # 验证自己的功能
 git push origin main
 ```
 
-出现冲突时，编辑冲突文件，执行 `git add <已解决的文件>`、`git commit` 完成合并；
-若要取消尚未完成的合并，执行 `git merge --abort`。
-合并上游不需要创建额外分支，也不需要强制推送。
+尖括号内容需替换为真实哈希；有依赖的提交应按先后顺序引入。
+出现冲突时，编辑冲突文件，执行 `git add <已解决的文件>`、
+`git cherry-pick --continue`；若要取消，执行 `git cherry-pick --abort`。
+在提交说明中记录原始上游哈希，避免重复引入。
+大版本整体同步需要先对新上游历史做相同清理，再评估合并。
+日常开发仍然只使用 `main`，不需要额外分支或强制推送。
 
 在另一台机器上首次克隆本项目后，补充本地配置：
 
