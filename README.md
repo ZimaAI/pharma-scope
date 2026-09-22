@@ -1,3 +1,15 @@
+# Pharma Scope
+
+基于 [GPT Researcher](https://github.com/assafelovic/gpt-researcher) 的个人二次开发项目。
+
+- 项目仓库：[ZimaAI/pharma-scope](https://github.com/ZimaAI/pharma-scope)
+- 开发分支：`main`
+- 中文指南：[本地启动、代码结构与二次开发流程](DEVELOPMENT.zh-CN.md)
+
+以下保留上游项目说明。
+
+---
+
 <div align="center" id="top">
 
 <img src="https://github.com/assafelovic/gpt-researcher/assets/13554167/20af8286-b386-44a5-9a83-3be1365139c3" alt="Logo" width="80">
