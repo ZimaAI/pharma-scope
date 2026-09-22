@@ -1,0 +1,41 @@
+# Project-defined settings. The adapter must explicitly implement/map every key.
+mode: demo
+runtime: replay
+server_profile: 4c8g
+research:
+  concurrency: 1
+  max_queued: 20
+  max_active_per_user: 3
+  max_tools: 20
+  max_model_calls: 12
+  max_total_tokens: 50000
+  max_context_tokens: 24000
+  max_candidate_records: 100
+  max_evidence_fragments: 60
+  wall_clock_seconds: 600
+  subagents_enabled: false
+sources:
+  request_concurrency: 2
+  ctgov_rps: 1
+  pubmed_rps_without_key: 2
+  pubmed_rps_with_key: 5
+  attempts: 3
+  connect_timeout_seconds: 10
+  read_timeout_seconds: 30
+  total_timeout_seconds: 60
+  max_decompressed_response_bytes: 8388608
+features:
+  browser: false
+  local_llm: false
+  embedding: false
+  ocr: false
+  image_generation: false
+  fulltext_ingestion: false
+  real_email: false
+# The following are known upstream names; these do NOT replace project-wide limits.
+gptr:
+  MAX_SCRAPER_WORKERS: 2
+  DEEP_RESEARCH_CONCURRENCY: 1
+  DEEP_RESEARCH_BREADTH: 2
+  DEEP_RESEARCH_DEPTH: 1
+  IMAGE_GENERATION_ENABLED: false

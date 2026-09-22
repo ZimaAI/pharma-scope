@@ -1,0 +1,127 @@
+{
+  "type": "offline DOM prototype smoke test",
+  "date": "2026-09-22",
+  "browser": "144.0.7559.96",
+  "method": "Playwright set_content; no network navigation",
+  "passed": 27,
+  "checks": [
+    {
+      "name": "Dashboard and always-visible demo boundary",
+      "status": "PASS"
+    },
+    {
+      "name": "All nine primary navigation areas render",
+      "status": "PASS"
+    },
+    {
+      "name": "Literature keeps correct drug identity and explicit missing abstract",
+      "status": "PASS"
+    },
+    {
+      "name": "Global search preserves query across navigation",
+      "status": "PASS"
+    },
+    {
+      "name": "Drug form validation, creation and HTML escaping",
+      "status": "PASS"
+    },
+    {
+      "name": "Trial status filtering",
+      "status": "PASS"
+    },
+    {
+      "name": "Other trials do not reuse PX-101 evidence",
+      "status": "PASS"
+    },
+    {
+      "name": "Enrollment comparison and exact before evidence",
+      "status": "PASS"
+    },
+    {
+      "name": "Status evidence has the corresponding before value",
+      "status": "PASS"
+    },
+    {
+      "name": "Source correction 160 to 150 references its own snapshot",
+      "status": "PASS"
+    },
+    {
+      "name": "Content reversion preserves new observation and old snapshot",
+      "status": "PASS"
+    },
+    {
+      "name": "Baseline does not fabricate change differences",
+      "status": "PASS"
+    },
+    {
+      "name": "Reports respect object identity and earlier knowledge cutoff",
+      "status": "PASS"
+    },
+    {
+      "name": "Author approval is disabled in prototype",
+      "status": "PASS"
+    },
+    {
+      "name": "Independent review confirmation, approval, publish, mock inbox",
+      "status": "PASS"
+    },
+    {
+      "name": "Markdown export labels fictional data",
+      "status": "PASS"
+    },
+    {
+      "name": "Validated task creation, seven-step offline replay and own draft",
+      "status": "PASS"
+    },
+    {
+      "name": "Source failure yields partial with a per-report coverage gap",
+      "status": "PASS"
+    },
+    {
+      "name": "Review rejection requires a reason",
+      "status": "PASS"
+    },
+    {
+      "name": "Replay cancellation stops its local timer",
+      "status": "PASS"
+    },
+    {
+      "name": "Subscription toggle and local creation",
+      "status": "PASS"
+    },
+    {
+      "name": "Loading, empty, failure and denied component states",
+      "status": "PASS"
+    },
+    {
+      "name": "Modal keyboard focus containment and Escape close",
+      "status": "PASS"
+    },
+    {
+      "name": "1440 / 1024 / 390 layouts without document overflow; mobile navigation",
+      "status": "PASS"
+    },
+    {
+      "name": "Reset restores deterministic fixture state",
+      "status": "PASS"
+    },
+    {
+      "name": "No uncaught JavaScript page errors",
+      "status": "PASS"
+    },
+    {
+      "name": "No HTTP requests during prototype interaction tests",
+      "status": "PASS"
+    }
+  ],
+  "page_errors": [],
+  "http_requests": [],
+  "not_tested": [
+    "Real backend or OpenAPI endpoints",
+    "Real model or clinical sources",
+    "Browser persistent storage/file URL policies",
+    "Real security authorization",
+    "Production deployment or server peak memory",
+    "Comprehensive accessibility audit"
+  ]
+}

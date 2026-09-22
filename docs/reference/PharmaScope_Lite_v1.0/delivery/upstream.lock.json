@@ -1,0 +1,11 @@
+{
+  "project": "PharmaScope Lite",
+  "document_version": "1.0.0",
+  "repository": "https://github.com/assafelovic/gpt-researcher",
+  "commit_sha": null,
+  "package_version": null,
+  "python_version": null,
+  "patchset_sha256": null,
+  "verification_status": "NOT_RUN",
+  "notes": "Official source reviewed 2026-09-22; M0 must install, pin and validate. main is NOT a deployment lock."
+}

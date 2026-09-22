@@ -1,0 +1,46 @@
+# TARGET TEMPLATE ONLY. No backend images are provided with this specification pack.
+# Supply built, version-locked images after implementation; do not use latest tags.
+services:
+  web:
+    image: ${PH_NGINX_IMAGE:?Set a built static-web image digest}
+    ports: ["127.0.0.1:8080:80"]
+    cpus: 0.25
+    mem_limit: 192m
+    restart: unless-stopped
+    depends_on: [api]
+  api:
+    image: ${PH_API_IMAGE:?Set an implemented API image digest}
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    environment:
+      PH_MODE: ${PH_MODE:-demo}
+      PH_DATABASE_URL: ${PH_DATABASE_URL:?Set database URL}
+      PH_SESSION_SECRET: ${PH_SESSION_SECRET:?Set session secret}
+      PH_PUBLIC_ORIGIN: ${PH_PUBLIC_ORIGIN:-http://localhost:8080}
+    cpus: 0.75
+    mem_limit: 768m
+    restart: unless-stopped
+    volumes: ["artifacts:/data/artifacts:ro"]
+    depends_on: [db]
+  worker:
+    image: ${PH_WORKER_IMAGE:?Set an implemented Worker image digest}
+    command: ["python", "-m", "app.worker"]
+    env_file: ../.env
+    cpus: 2
+    mem_limit: 3072m
+    restart: unless-stopped
+    volumes: ["artifacts:/data/artifacts", "../config:/app/config:ro"]
+    depends_on: [db]
+  db:
+    image: ${PH_POSTGRES_IMAGE:?Set a verified PostgreSQL image digest}
+    environment:
+      POSTGRES_USER: pharma
+      POSTGRES_DB: pharma
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set database password}
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "work_mem=4MB", "-c", "max_connections=40"]
+    cpus: 0.75
+    mem_limit: 1536m
+    restart: unless-stopped
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+volumes:
+  pgdata:
+  artifacts:

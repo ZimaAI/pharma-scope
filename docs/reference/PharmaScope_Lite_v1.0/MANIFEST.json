@@ -1,0 +1,409 @@
+{
+  "project": "PharmaScope Lite",
+  "version": "1.0.0",
+  "created": "2026-09-22",
+  "status": "DESIGN_AND_PROTOTYPE_READY",
+  "source_code_backend_included": false,
+  "files": [
+    {
+      "path": ".env.example",
+      "size_bytes": 930,
+      "sha256": "967e915ff65f8faa8418717aa29f93df14769313fc12dd0d33371753bfe5cdb7"
+    },
+    {
+      "path": "AGENTS.md",
+      "size_bytes": 4433,
+      "sha256": "b8ddf32e00c6f866b24b7ec1e9815abc73f367ca94e896ee3e5f5da742df5022"
+    },
+    {
+      "path": "CODEX_START.md",
+      "size_bytes": 1803,
+      "sha256": "f25215e4812a693bda2cc6d0c4d4046e290b598953b4e6fe61bca93251f0b54e"
+    },
+    {
+      "path": "COMPLETE.md",
+      "size_bytes": 139582,
+      "sha256": "7f807455fab6178bac9504b4523a1f3f31fc2e9faa60c4691a29ef3f5551183e"
+    },
+    {
+      "path": "README.md",
+      "size_bytes": 3883,
+      "sha256": "8d379c490d670d4ecfcf2767520359252d11bfcb17305b50917a7c520b117bb8"
+    },
+    {
+      "path": "acceptance/README.md",
+      "size_bytes": 388,
+      "sha256": "ccc65cf23cb82c93fdafc877dd04ea2ac03190d219c0906976d2e09787dc8f39"
+    },
+    {
+      "path": "acceptance/acceptance.feature",
+      "size_bytes": 4757,
+      "sha256": "ec86285074523adf421463c6881b55661398ee9fce6c30435ff6edf808ec586f"
+    },
+    {
+      "path": "assets/tokens.css",
+      "size_bytes": 802,
+      "sha256": "1440f0083e67906b59fdb6e0b0f2ebc60db4571ceaa57a582e05561c9b90aa62"
+    },
+    {
+      "path": "config/lite.yaml",
+      "size_bytes": 1029,
+      "sha256": "1ce41ecc39163f46a088d11c9fa3fb86b4741c16fdd0e27d293fc1e6e38a0049"
+    },
+    {
+      "path": "contracts/README.md",
+      "size_bytes": 1089,
+      "sha256": "ca7ac7f1e4a35a1d59ccc86fc925d9e8e016b7d5d6cd657caa131e59612737e4"
+    },
+    {
+      "path": "contracts/event-envelope.schema.json",
+      "size_bytes": 1559,
+      "sha256": "1ed138a5905546896a03c18fe1bb12c7772b9e05a82c67941b78835b8683bfa3"
+    },
+    {
+      "path": "contracts/openapi.yaml",
+      "size_bytes": 204418,
+      "sha256": "090f8a1b1203d2cbbbd5f105f827cc37716ebfce24f30b71645fd0e7929873da"
+    },
+    {
+      "path": "contracts/research-output.schema.json",
+      "size_bytes": 7327,
+      "sha256": "ab411958655e5fcfc9980bb99cbcdecfcbf081536c72c1a7d77ff3764f776594"
+    },
+    {
+      "path": "contracts/source-snapshot.schema.json",
+      "size_bytes": 9134,
+      "sha256": "b523c47bc43ce331e8b8bc5d760375ab54e4d9374ca8cd1746408e4159172806"
+    },
+    {
+      "path": "contracts/tool-catalog.json",
+      "size_bytes": 7196,
+      "sha256": "1f5e6063ff2d76b1d9f2972c3c4c3da94f5ee530863c3898cdbf1bd10a43fed8"
+    },
+    {
+      "path": "contracts/tool-result.schema.json",
+      "size_bytes": 1939,
+      "sha256": "feb659f6efc9a7a9a00e69d83ba09a76300e340872009b366ab2f5ad32c892d3"
+    },
+    {
+      "path": "database/README.md",
+      "size_bytes": 1224,
+      "sha256": "4289b76b452131d26f353dd8764c63d69c933e21ed77671f987950e3e67e2956"
+    },
+    {
+      "path": "database/schema.sql",
+      "size_bytes": 27162,
+      "sha256": "e52a0c0c0e5ab24907c998b86d508a851fc4c9972e960c447df5e846a83357b5"
+    },
+    {
+      "path": "delivery/CONTEXT_VALIDATION.md",
+      "size_bytes": 1116,
+      "sha256": "574a5400c7206248f49185981096112021f84cc470d188f7692656365b3e5eef"
+    },
+    {
+      "path": "delivery/DECISIONS.md",
+      "size_bytes": 411,
+      "sha256": "5972707a3afc14430985554ce4710ff020f91080d2c8ea7cc70974e33199490d"
+    },
+    {
+      "path": "delivery/STATE.md",
+      "size_bytes": 822,
+      "sha256": "5f81fd27c414905fdc57a456faa4375d9d2c351162c9c70aafd9901bdcdac26b"
+    },
+    {
+      "path": "delivery/TEST_RESULTS.md",
+      "size_bytes": 1718,
+      "sha256": "993ad9d04765abffccdb2ac8552029dec16b18f60169c4ed36ee490a227f270f"
+    },
+    {
+      "path": "delivery/prototype-tests.json",
+      "size_bytes": 3279,
+      "sha256": "cf87b897facf6144abae32dbbff6e696757bff564e5a0d13c6272e1cda77942e"
+    },
+    {
+      "path": "delivery/upstream.lock.json",
+      "size_bytes": 387,
+      "sha256": "17877a55df5d566d763b70b73cf34afb87d6b7283227a592fd4e5e54ef838ac0"
+    },
+    {
+      "path": "deploy/compose.target.yaml",
+      "size_bytes": 1679,
+      "sha256": "cbd33cfbed976d3f2f1f9d3b27930b12d1f7e96a79ed99c29213d3d896937da6"
+    },
+    {
+      "path": "deploy/nginx.target.conf",
+      "size_bytes": 661,
+      "sha256": "454220c179fa9fd6421fc6e30964bf6aa554137204b9d8a0d43679c7093f9fd3"
+    },
+    {
+      "path": "design.md",
+      "size_bytes": 6660,
+      "sha256": "b3a614fc31cb0d84bee703a6445cf08210cb3c29a6d8a3a406a1040bc65cf0fc"
+    },
+    {
+      "path": "docs/00-baseline.md",
+      "size_bytes": 3275,
+      "sha256": "155652dbfb2cc74800814ef5e59eac07270ce67d268b2f6fb358499a9e20677f"
+    },
+    {
+      "path": "docs/01-prd.md",
+      "size_bytes": 5226,
+      "sha256": "419c7b8e94edd1366d01011ffab416f7f69f1ee658c0364cd3151d6044ccfa34"
+    },
+    {
+      "path": "docs/02-domain-model.md",
+      "size_bytes": 5546,
+      "sha256": "c9a6f4a4001fe825b59b24fbeb61c4f200e0dee7f84f9c643f2b713e1ca56040"
+    },
+    {
+      "path": "docs/03-functional-spec.md",
+      "size_bytes": 7682,
+      "sha256": "9c52bfc35f19df48c4a721896dda45be15bbf35829bfd6c06f800c81459cc239"
+    },
+    {
+      "path": "docs/04-architecture.md",
+      "size_bytes": 5783,
+      "sha256": "2d5cbbfa70018f025b3254cd040f0c43ff2959aa004f3c5986e1fdcbddd956e4"
+    },
+    {
+      "path": "docs/05-data-model.md",
+      "size_bytes": 6750,
+      "sha256": "97070c57b160567766ff45a55711f290d2d8339089d625e285b91939328ffec3"
+    },
+    {
+      "path": "docs/06-source-adapters.md",
+      "size_bytes": 6122,
+      "sha256": "c6a51e630ae88407646167a2d0ddb889967350b888b4355a541a16db0735983a"
+    },
+    {
+      "path": "docs/07-agent-spec.md",
+      "size_bytes": 6849,
+      "sha256": "96168f9b06948ed77c3d4861efd402b80f42c754a0be8a2033d6274ab0d0bb1b"
+    },
+    {
+      "path": "docs/08-api-contract.md",
+      "size_bytes": 6326,
+      "sha256": "327c7d2916f2bf0c1e38d8454dd02dc6c9ec813b66a340fce45cbe969a76351b"
+    },
+    {
+      "path": "docs/09-ui-spec.md",
+      "size_bytes": 6407,
+      "sha256": "15dcdec17cdfb199a181c9d46ca7b164eed1ac6f7a930c067647fd9af99d758e"
+    },
+    {
+      "path": "docs/10-security.md",
+      "size_bytes": 4749,
+      "sha256": "b0ba35ab04f31cccdb8faf73af612bca1139129abb69d209b7496d9ffbfb1fda"
+    },
+    {
+      "path": "docs/11-reliability.md",
+      "size_bytes": 5757,
+      "sha256": "72d56d8716413b222a997589c4021495f3663bc59d8d6b7a8e0a5136ed747b24"
+    },
+    {
+      "path": "docs/12-test-and-evaluation.md",
+      "size_bytes": 4050,
+      "sha256": "abcbfc16082f6639bba8f6802cc7fb60af649b5b1e5e6de4d61d8df267c046db"
+    },
+    {
+      "path": "docs/13-deployment-and-operations.md",
+      "size_bytes": 3286,
+      "sha256": "9c9e8a345213a3ae034fcafacc2084eeef9945bb1a7223ad362c1e51677a7831"
+    },
+    {
+      "path": "docs/14-implementation-plan.md",
+      "size_bytes": 3171,
+      "sha256": "328c4a4ccd03238e6a1cf12d2865d823f42d8f1932473f763b134245ab93796c"
+    },
+    {
+      "path": "docs/15-decisions-and-risks.md",
+      "size_bytes": 2364,
+      "sha256": "1355032839d394d537a9a85b56471e35e76391777cebb058acba766dbe251a98"
+    },
+    {
+      "path": "docs/16-sources-and-verification.md",
+      "size_bytes": 3660,
+      "sha256": "872b369164ad5b020a8978f49f62d133b1706f1d49aecb389791fd1422e8f823"
+    },
+    {
+      "path": "docs/17-demo-guide.md",
+      "size_bytes": 2463,
+      "sha256": "9ff296bb3659083ce46a54c7e3a0573f060a0286a3c167ff13aa981c05b25fb0"
+    },
+    {
+      "path": "docs/18-engineering-handoff.md",
+      "size_bytes": 1378,
+      "sha256": "a65944fe47bd855a7ccd2eb47d900c9229b4f596fc3ac5c68c5da105440cc08b"
+    },
+    {
+      "path": "docs/19-traceability.md",
+      "size_bytes": 1193,
+      "sha256": "f35483c3371582de27e19881a83fef2510074eb849a761e64aa999429464734b"
+    },
+    {
+      "path": "docs/20-gptr-integration.md",
+      "size_bytes": 4908,
+      "sha256": "78c9cf3c31f80a6130c27c10e274c6d2d365dfaee717acb01892ff2c37de4e8d"
+    },
+    {
+      "path": "docs/21-resource-budget.md",
+      "size_bytes": 3891,
+      "sha256": "36eeaa83a97ea1bd4676400def49986aaeeff0d998605948ff4221ad5e096ef3"
+    },
+    {
+      "path": "docs/22-resume-and-demo.md",
+      "size_bytes": 2011,
+      "sha256": "dcfd05dac2d8c6ed2bfbd82dca8e703d77817900893ec072f759515f721da8b6"
+    },
+    {
+      "path": "docs/23-prototype-and-acceptance.md",
+      "size_bytes": 3770,
+      "sha256": "e4e34728c08e8e1b055b95223d7216d0ecdeee58860c98109b62ef4fd07eefe2"
+    },
+    {
+      "path": "docs/INDEX.md",
+      "size_bytes": 1190,
+      "sha256": "833b90e0bf9ace19c1a14c053e12e0f14d28dfaa078cf304b7e9a9aa18ab6b7b"
+    },
+    {
+      "path": "documentation.html",
+      "size_bytes": 418159,
+      "sha256": "b0d9aa3bfee59cd5ccc40a8437592857373bbc342866cc384ddb2610680d8392"
+    },
+    {
+      "path": "fixtures/00-identities.json",
+      "size_bytes": 967,
+      "sha256": "bcd55b4e4d880c6afddf37ee7a5819bb123d23ea6ce4694767062057269fb7f4"
+    },
+    {
+      "path": "fixtures/01-drugs.json",
+      "size_bytes": 962,
+      "sha256": "d7a97b848214b23cfda34b0addf3a271b6fe197cc6ebe90f74d6a2fcc526552e"
+    },
+    {
+      "path": "fixtures/02-trial-snapshots.json",
+      "size_bytes": 6613,
+      "sha256": "7eb61c37dd631939d8ea4009f53199658c965abbca50f6fc6678a212ac3f51e7"
+    },
+    {
+      "path": "fixtures/03-observations.json",
+      "size_bytes": 1976,
+      "sha256": "ccfbfb99e42ff969ba5766d85998bc58ddb2600cf33a8f497278bdd686924772"
+    },
+    {
+      "path": "fixtures/04-trial-record.json",
+      "size_bytes": 1156,
+      "sha256": "8a4bfa6f3f65fba6c71c4da0287f0d58ba153b9507407b1fb03275e3cea9417b"
+    },
+    {
+      "path": "fixtures/05-publication-snapshot.json",
+      "size_bytes": 1768,
+      "sha256": "f5734458a8460cc73769d22a3902b874b545e9cbb16e9fab1cfffe393f1db8d3"
+    },
+    {
+      "path": "fixtures/06-evidence.json",
+      "size_bytes": 2159,
+      "sha256": "58641d39650510950f155bd543471975ab299047be7dc01b22359bb943ec1cd4"
+    },
+    {
+      "path": "fixtures/07-research-request.json",
+      "size_bytes": 519,
+      "sha256": "6ef7f585fb9bcef193a28e50f26466e742b03621af31c32d3641ef8b613cf7ae"
+    },
+    {
+      "path": "fixtures/08-research-output.json",
+      "size_bytes": 2892,
+      "sha256": "6757447a7f3ae6a8af2f8c524a9fd1e46e327a3414490de2d5793a9f8a08a917"
+    },
+    {
+      "path": "fixtures/09-run-events.json",
+      "size_bytes": 2246,
+      "sha256": "f17d845a59bf4e64e57c101f6df52b439d6666230d7eb9d47797c1f47c5b814f"
+    },
+    {
+      "path": "fixtures/10-expectations.json",
+      "size_bytes": 537,
+      "sha256": "2ba658ac4f9108ca8bb1c9fad05f0d9ea2ae6a2fbd22d1db962ae157354bceea"
+    },
+    {
+      "path": "fixtures/11-events-and-revisions.json",
+      "size_bytes": 2414,
+      "sha256": "b29af59c9b907d0d1c7ddb017403753c38454867131c165c696c24cbe8a359ea"
+    },
+    {
+      "path": "fixtures/README.md",
+      "size_bytes": 1160,
+      "sha256": "331d59811c89c5142b22a6a13923eac927f2f9269cbb8b8206d9e0e90a4c5982"
+    },
+    {
+      "path": "implementation/MODULES.md",
+      "size_bytes": 794,
+      "sha256": "ba5fbe346d3d3e8485c6b56bfd954bbc6857f653200952b35feb2ecd47400453"
+    },
+    {
+      "path": "prompts/event-summary.md",
+      "size_bytes": 655,
+      "sha256": "8fd22e5cd18feb8892ecf8de380186fc6f0300bce9de45748c34a92f3ef8f8d4"
+    },
+    {
+      "path": "prompts/evidence-review.md",
+      "size_bytes": 879,
+      "sha256": "30016ccb8fb882e8e60ff8fe3b18d5ba45d81edf9efc130e9383d6045db430ba"
+    },
+    {
+      "path": "prompts/research-system.md",
+      "size_bytes": 2045,
+      "sha256": "41f902d73891eeaa8cc34503d25823d0ae130a1feef6d14c738e3f869da3a46f"
+    },
+    {
+      "path": "prototype/README.md",
+      "size_bytes": 4276,
+      "sha256": "6735f0c439f3e0f3eebaad6c6075944922c753d7f5ea0db32b14039982603aaf"
+    },
+    {
+      "path": "prototype/index.html",
+      "size_bytes": 93440,
+      "sha256": "ef2c11092f206afbf01a6bc3f5cd555891e17eb9b7b5331cd69b8b7bdc59fab7"
+    },
+    {
+      "path": "prototype/previews/01-dashboard.png",
+      "size_bytes": 287892,
+      "sha256": "32513bdc8445d1be3835290b75f5d8b054f4b94a59ca2fcd2987bfbdf30d0678"
+    },
+    {
+      "path": "prototype/previews/02-changes.png",
+      "size_bytes": 175566,
+      "sha256": "d35ed1e18f1aaff83a96da237c51e3679c2f06223080ace3db9b40ebd1904877"
+    },
+    {
+      "path": "prototype/previews/03-report-review.png",
+      "size_bytes": 269270,
+      "sha256": "feacd16133d2a2025def3163f48d4128b9c26c39b4623dc6177d93e11a0b1c63"
+    },
+    {
+      "path": "prototype/previews/04-evidence-drawer.png",
+      "size_bytes": 322118,
+      "sha256": "d566c5e64047b7dc08051504e6ecd0e123dfea2083fd450739819bf24141d947"
+    },
+    {
+      "path": "prototype/previews/05-agent-run.png",
+      "size_bytes": 222564,
+      "sha256": "29d0e4533b59859ea1b078d5850dd3080b38b456708f993bdd34b2bf1861e188"
+    },
+    {
+      "path": "prototype/previews/06-mobile.png",
+      "size_bytes": 102147,
+      "sha256": "12ca0c7c71c9fb6ce7c4787128ac29743bc09b73ff56b8730cbd2b048acb71cf"
+    },
+    {
+      "path": "prototype/smoke_test.py",
+      "size_bytes": 11476,
+      "sha256": "ae8424cf58d86fc4b8c944cdeb22f933a72f9ada6f09a0274b91d3e0581698c7"
+    },
+    {
+      "path": "scripts/verify_context.py",
+      "size_bytes": 7380,
+      "sha256": "1e91c242a322cef6c4db1917584136c9d8ec69535c899267e46b384bddbe5160"
+    }
+  ]
+}
