@@ -1,0 +1,23 @@
+[Unit]
+Description=PharmaScope Lite API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zima
+Group=zima
+WorkingDirectory=/home/zima/Develop/Projects/pharma-scope
+ExecStart=/home/zima/Develop/Projects/pharma-scope/.venv/bin/uvicorn backend.pharma_scope_app:app --host 127.0.0.1 --port 18180 --workers 1
+Restart=on-failure
+RestartSec=5
+Environment=PHARMA_RUNTIME_MODE=replay
+Environment=PHARMA_ALLOW_DEV_HEADER=0
+Environment=PHARMA_COOKIE_SECURE=1
+Environment=PHARMA_DEMO_PASSWORD=demo
+Environment=CORS_ALLOW_ORIGINS=https://pharmascope.zimagent.top,http://pharmascope.zimagent.top
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
