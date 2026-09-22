@@ -49,9 +49,13 @@ body {
   margin: 0px !important;
   min-height: 100%;
   position: relative;
-  background: #0C111F;
+  background: #F6F8FC;
   overflow-x: hidden;
 }
+
+/* PharmaScope owns the page surface; legacy GPT Researcher utilities remain
+   available to the package but must not change the light workbench canvas. */
+body::before, body::after { display: none; }
 
 /* Background gradient orbs - static version */
 body::before {
@@ -218,4 +222,3 @@ body::after {
 .sidebar-z-index {
   z-index: 50;
 }
-

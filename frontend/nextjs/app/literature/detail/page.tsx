@@ -1,0 +1,4 @@
+"use client";
+import { useEffect, useState } from "react";
+import PharmaScopeShell, { StatusBadge } from "@/components/pharma/PharmaScopeShell";
+export default function LiteratureDetailPage() { const [id, setId] = useState("pub-demo-001"); useEffect(() => { setId(new URLSearchParams(window.location.search).get("id") || "pub-demo-001"); }, []); return <PharmaScopeShell title="文献详情" description="元数据、摘要可用性与来源快照。"><section className="ps-card"><div className="ps-card-head"><div><h2>PX-101 虚构方案研究：登记资料说明</h2><small>{id} · PubMed</small></div><StatusBadge status="DEMO" tone="info" /></div><div className="ps-card-body"><dl className="ps-kv"><dt>发表日期</dt><dd>2026-09-16（精度：日）</dd><dt>摘要</dt><dd>可获得摘要</dd><dt>原文语言</dt><dd>英文</dd></dl><div className="ps-callout amber" style={{ marginTop: 22 }}>该摘要为虚构内容，只用于验证证据抽屉与引用交互，不支持任何临床结论。</div></div></section></PharmaScopeShell>; }

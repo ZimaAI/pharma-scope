@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""
-GPT-Researcher Backend Server Startup Script
+"""PharmaScope Lite API startup script.
 
-Run this to start the research API server.
+Use ``PHARMA_LEGACY=1`` only when running the original GPT Researcher demo
+routes.  The default is the versioned PharmaScope API in
+``pharma_scope_app``.
 """
 
 import uvicorn
@@ -18,13 +19,13 @@ if __name__ == "__main__":
     os.chdir(backend_dir)
     
     # Start the server
+    app_module = "server.app:app" if os.getenv("PHARMA_LEGACY") == "1" else "pharma_scope_app:app"
     uvicorn.run(
-        "server.app:app",
+        app_module,
         host="0.0.0.0", 
         port=8000, 
         reload=True,
         log_level="info"
     )
-
 
 

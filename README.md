@@ -6,6 +6,12 @@
 - 开发分支：`main`
 - 中文指南：[本地启动、代码结构与二次开发流程](DEVELOPMENT.zh-CN.md)
 
+## PharmaScope Lite
+
+仓库同时包含医药研发情报与临床试验变化追踪平台。参阅[实现说明](docs/PHARMASCOPE_IMPLEMENTATION.md)、根目录 [design.md](design.md) 和 `docs/reference/PharmaScope_Lite_v1.0` 下的产品合同。
+
+离线回放环境可运行 `make setup && make dev`；静态前端构建：`cd frontend/nextjs && npm run build`。
+
 以下保留上游项目说明。
 
 ---

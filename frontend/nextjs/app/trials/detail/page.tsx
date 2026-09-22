@@ -1,0 +1,5 @@
+"use client";
+import { useEffect, useState } from "react";
+import PharmaScopeShell, { StatusBadge } from "@/components/pharma/PharmaScopeShell";
+import { demoTrials, getTrial, Trial } from "@/components/pharma/pharmaApi";
+export default function TrialDetailPage() { const [trial, setTrial] = useState<Trial>(demoTrials[0]); useEffect(() => { const id = new URLSearchParams(window.location.search).get("id") || demoTrials[0].id; getTrial(id).then(setTrial); }, []); const p = trial.current_projection || {}; return <PharmaScopeShell title="试验详情" description="当前投影、原始字段与观察版本。"><section className="ps-card"><div className="ps-card-head"><div><h2>{trial.external_id}</h2><small>{p.brief_title || "暂无标题"}</small></div><StatusBadge status={p.overall_status || "未知"} tone="info" /></div><div className="ps-card-body"><dl className="ps-kv"><dt>来源</dt><dd>{trial.source}</dd><dt>阶段</dt><dd>{p.phase?.join(", ") || "未知"}</dd><dt>目标入组</dt><dd>{p.enrollment ?? "未知"}</dd><dt>最近观察</dt><dd>{new Date(trial.updated_at).toLocaleString("zh-CN")}</dd></dl><div className="ps-callout" style={{ marginTop: 20 }}>状态和人数均为登记字段原值。页面不会把状态变更解释为试验成功或疗效结论。</div></div></section></PharmaScopeShell>; }
