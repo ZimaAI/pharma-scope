@@ -1,11 +1,8 @@
 name: Build-Push and Update Image Tag
 
 on:
-    push: 
-        branches: [ master ]
-        paths-ignore:
-        - 'terraform/**' 
-    
+    workflow_dispatch:
+
 env:
     REPO_FULL_NAME: ${{ github.repository }}
     AWS_REGION: us-east-1
@@ -47,23 +44,23 @@ jobs:
             IMAGE_TAG="${TIMESTAMP}-${SHORT_SHA}"
             echo "tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
             echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
-        
+
         - name: Configure AWS credentials
           uses: aws-actions/configure-aws-credentials@v4
           with:
             role-to-assume: arn:aws:iam::908027381725:role/${{ steps.extract_short_name_repo.outputs.REPO_NAME }}-github-actions-role
             aws-region: ${{ env.AWS_REGION }}
-        
+
         - name: Login to ECR
           id: login-ecr
           uses: aws-actions/amazon-ecr-login@v2
-        
+
         - name: Build Docker image
           working-directory: .
           run: |
-            docker build --build-arg VITE_API_URL="${{ vars.VITE_API_URL }}" -t ${{ steps.login-ecr.outputs.registry }}/${{ steps.extract_short_name_repo.outputs.REPO_NAME }}:${{ steps.image-tag.outputs.tag }} . 
+            docker build --build-arg VITE_API_URL="${{ vars.VITE_API_URL }}" -t ${{ steps.login-ecr.outputs.registry }}/${{ steps.extract_short_name_repo.outputs.REPO_NAME }}:${{ steps.image-tag.outputs.tag }} .
             docker push ${{ steps.login-ecr.outputs.registry }}/${{ steps.extract_short_name_repo.outputs.REPO_NAME }}:${{ steps.image-tag.outputs.tag }}
-        
+
         - name: Update image tag
           run: |
             echo "image_tag=${{ steps.image-tag.outputs.tag }}" >> $GITHUB_OUTPUT
@@ -71,7 +68,7 @@ jobs:
         - name: Trigger deployment workflow
           run: |
             echo "Triggering deployment workflow with image tag: ${{ steps.image-tag.outputs.tag }}"
-            
+
             # Try GitHub CLI first
             if gh workflow run .github/workflows/deploy.yml \
             --ref master \
@@ -89,7 +86,7 @@ jobs:
             fi
           env:
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
+
         - name: Create deployment summary
           run: |
             echo "## 🚀 Build Summary" >> $GITHUB_STEP_SUMMARY

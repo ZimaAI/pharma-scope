@@ -1,11 +1,7 @@
 name: Plugin Quality Gate
 
 on:
-  pull_request:
-    paths:
-      - ".codex-plugin/**"
-      - "skills/**"
-      - ".mcp.json"
+  workflow_dispatch:
 
 jobs:
   scan:

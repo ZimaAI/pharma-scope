@@ -1,13 +1,5 @@
 name: Terraform Deploy
 on:
-    push:
-        branches: [ master ]
-        paths:
-        - 'terraform/**'
-    pull_request:
-        branches: [ master ]
-        paths:
-        - 'terraform/**'
     workflow_dispatch:
         inputs:
             image_tag:
@@ -46,12 +38,12 @@ jobs:
       run: |
         # Use defaults if inputs are empty or not provided
         IMAGE_TAG="${{ inputs.image_tag }}"
-        
+
         # Set to 'latest' if empty, null, or not provided
         if [ -z "$IMAGE_TAG" ] || [ "$IMAGE_TAG" = "null" ]; then
           IMAGE_TAG="latest"
         fi
-        
+
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         echo "Using image tag: $IMAGE_TAG"
 
@@ -111,7 +103,7 @@ jobs:
           });
 
   terraform-apply:
-    if: github.ref == 'refs/heads/master' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     permissions:
@@ -121,7 +113,7 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Extract repository name
       id: extract_short_name_repo
       run: |
@@ -246,9 +238,9 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
         fi
-        
+
         echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
         echo "- Service will be available at \`${{ steps.extract_short_name_repo.outputs.REPO_NAME }}.ggai:8000\`" >> $GITHUB_STEP_SUMMARY
         echo "- Check ECS console for service health" >> $GITHUB_STEP_SUMMARY
         echo "- Monitor CloudWatch logs: \`/ecs/${{ steps.extract_short_name_repo.outputs.REPO_NAME }}\`" >> $GITHUB_STEP_SUMMARY
-        
+
