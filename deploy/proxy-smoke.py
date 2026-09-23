@@ -74,6 +74,8 @@ with tempfile.TemporaryDirectory(prefix="pharmascope-proxy-") as directory:
             opener.open(origin + "/api/v1/auth/me", timeout=5)
         except urllib.error.HTTPError as error:
             assert error.code == 401 and error.headers.get("x-request-id")
+            assert error.headers.get("Cache-Control") == "no-store"
+            assert error.headers.get("X-Content-Type-Options") == "nosniff"
         else:
             raise AssertionError("authentication boundary missing")
         login = urllib.request.Request(origin + "/api/v1/auth/login", data=json.dumps({"email": "analyst@pharmascope.invalid", "password": os.environ.get("PHARMA_DEMO_PASSWORD", "demo")}).encode(), headers={"Content-Type": "application/json"})

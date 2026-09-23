@@ -9,9 +9,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import ipaddress
 import json
 import os
+import re
 import secrets
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -25,7 +28,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .repository import RepositoryUnavailable, RepositoryConflict, repository_from_env, restore_state, state_payload
-from .auth import verify_password
+from .auth import hash_password, verify_password
 from sqlalchemy.exc import SQLAlchemyError
 from .sources import ClinicalTrialsGovAdapter, PubMedAdapter, SourceError, SourceQuery, SourcePage
 from .source_ingest import SnapshotIngestor
@@ -40,6 +43,7 @@ SECOND_WORKSPACE = "b9c9d1b4-62c5-5b58-92d1-de56235db31d"
 DEFAULT_USER = "dacd1189-f315-5985-98ae-dce1a533104c"
 REVIEWER_USER = "830a0c39-02ed-53a8-9616-c4d7827fb9ad"
 ADMIN_USER = "95023655-2f60-587d-834b-eabaa2e759af"
+DUMMY_PASSWORD_HASH = hash_password("no-such-account-password")
 
 
 def now() -> str:
@@ -72,8 +76,28 @@ def page(items: Iterable[dict], limit: int = 20, cursor: str | None = None) -> d
 
 
 class LoginRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class DemoAccountRequest(BaseModel):
+    user_id: str | None
+
+
+class CreateMemberRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    display_name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=12, max_length=256)
+    role: str = Field(default="reader")
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+class PasswordResetRequest(BaseModel):
+    new_password: str = Field(min_length=12, max_length=256)
 
 
 class DomainState:
@@ -107,6 +131,9 @@ class DomainState:
         self.audit: list[dict] = []
         self.notices: list[dict] = []
         self.idempotency: dict[tuple[str, str], tuple[str, Any]] = {}
+        # Local request throttles are deliberately transient. The reverse proxy
+        # also limits public authentication routes across API workers.
+        self.auth_attempts: dict[str, list[float]] = {}
         self.sources: dict[str, dict] = {
             "ctgov": {"source": "ctgov", "enabled": True, "configured": True, "state": "healthy", "last_success_at": None, "last_error_code": None, "coverage": {"records": 0}},
             "pubmed": {"source": "pubmed", "enabled": True, "configured": True, "state": "healthy", "last_success_at": None, "last_error_code": None, "coverage": {"records": 0}},
@@ -122,6 +149,7 @@ class DomainState:
         ws = ident.get("workspace", {"id": DEFAULT_WORKSPACE, "name": "PharmaScope 演示研究组", "timezone": "Asia/Shanghai"})
         ws2 = ident.get("second_workspace", {"id": SECOND_WORKSPACE, "name": "隔离测试组", "timezone": "America/Los_Angeles"})
         self.workspaces[ws["id"]] = {**ws, "created_at": now()}
+        self.workspaces[ws["id"]].update({"demo_user_id": DEFAULT_USER, "public_demo": True})
         self.workspaces[ws2["id"]] = {**ws2, "created_at": now()}
         for u in ident.get("users", []):
             self.users[u["id"]] = {**u, "is_active": True, "created_at": now()}
@@ -203,20 +231,87 @@ def error(code: str, message: str, status: int = 400, details: dict | None = Non
     return JSONResponse(status_code=status, content={"error": {"code": code, "message": message, "details": details or {}, "request_id": uid()}})
 
 
-async def user_context(request: Request) -> dict:
+def session_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def session_for(request: Request) -> dict | None:
     token = request.cookies.get("pharmascope_session")
+    return state.sessions.get(session_key(token)) if token else None
+
+
+def guest_subject(session: dict) -> tuple[dict, dict] | None:
+    workspace_id = session.get("workspace_id")
+    user_id = session.get("user_id")
+    ws = state.workspaces.get(workspace_id)
+    user = state.users.get(user_id)
+    m = state.memberships.get((workspace_id, user_id))
+    if not (ws and is_public_demo_workspace(ws) and selected_demo_user_id(ws) == user_id
+            and user and user.get("is_active", True)
+            and m and m.get("enabled", True)):
+        return None
+    return user, m
+
+
+def selected_demo_user_id(workspace: dict) -> str | None:
+    if "demo_user_id" in workspace:
+        return workspace["demo_user_id"]
+    # Older replay databases were seeded before the setting existed. Only the
+    # known fictional replay workspace receives this compatibility default.
+    if (os.getenv("PHARMA_RUNTIME_MODE", "live") in ("replay", "demo")
+            and workspace.get("id") == DEFAULT_WORKSPACE):
+        return DEFAULT_USER
+    return None
+
+
+def is_public_demo_workspace(workspace: dict, workspaces: dict | None = None) -> bool:
+    workspaces = state.workspaces if workspaces is None else workspaces
+    if any("public_demo" in candidate for candidate in workspaces.values()):
+        return workspace.get("public_demo") is True
+    return (os.getenv("PHARMA_RUNTIME_MODE", "live") in ("replay", "demo")
+            and workspace.get("id") == DEFAULT_WORKSPACE)
+
+
+def guest_session_valid_in_payload(token: str | None, payload: dict, *, guest_id: str,
+                                   workspace_id: str, subject_user_id: str) -> bool:
+    """Revalidate an open guest stream against a freshly loaded repository state."""
     if not token:
-        # API clients in replay mode may send an explicit user header. This is
-        # disabled when PHARMA_ALLOW_DEV_HEADER=0 and never trusted for role.
-        header_user = request.headers.get("X-User-Id") if os.getenv("PHARMA_ALLOW_DEV_HEADER", "1") == "1" else None
+        return False
+    session = payload.get("sessions", {}).get(session_key(token), {})
+    if (not session.get("guest") or session.get("guest_id") != guest_id
+            or session.get("workspace_id") != workspace_id
+            or session.get("user_id") != subject_user_id
+            or session.get("expires_at", 0) <= datetime.now(timezone.utc).timestamp()):
+        return False
+    workspaces = payload.get("workspaces", {})
+    workspace = workspaces.get(workspace_id)
+    user = payload.get("users", {}).get(subject_user_id)
+    member = payload.get("memberships", {}).get(workspace_id + "|" + subject_user_id)
+    return bool(workspace and is_public_demo_workspace(workspace, workspaces)
+                and selected_demo_user_id(workspace) == subject_user_id
+                and user and user.get("is_active", True)
+                and member and member.get("enabled", True))
+
+
+async def user_context(request: Request) -> dict:
+    session = session_for(request)
+    if not session:
+        # This development-only escape hatch is opt-in and unavailable live.
+        header_user = request.headers.get("X-User-Id") if os.getenv("PHARMA_ALLOW_DEV_HEADER", "0") == "1" else None
         if os.getenv("PHARMA_RUNTIME_MODE", "live") in ("replay", "demo") and header_user and header_user in state.users:
             return state.users[header_user]
         raise HTTPException(401, detail={"code": "AUTH_REQUIRED", "message": "Authentication required"})
-    session = state.sessions.get(token)
-    if not session or session["expires_at"] < datetime.now(timezone.utc).timestamp():
+    if session["expires_at"] < datetime.now(timezone.utc).timestamp():
         raise HTTPException(401, detail={"code": "AUTH_REQUIRED", "message": "Session expired"})
+    if session.get("guest"):
+        if not guest_subject(session):
+            raise HTTPException(401, detail={"code": "AUTH_REQUIRED", "message": "Demo account is unavailable"})
+        return {"id": session["guest_id"], "email": f"guest-{session['guest_id']}@pharmascope.invalid", "display_name": "游客", "is_active": True,
+                "is_guest": True, "demo_user_id": session["user_id"], "guest_workspace_id": session["workspace_id"]}
     user = state.users.get(session["user_id"])
-    if not user or not user.get("is_active", True):
+    if not user or not user.get("is_active", True) or not any(
+        m.get("user_id") == user["id"] and m.get("enabled", True) for m in state.memberships.values()
+    ):
         raise HTTPException(401, detail={"code": "AUTH_REQUIRED", "message": "Inactive account"})
     return user
 
@@ -232,16 +327,27 @@ def membership_contract(m: dict) -> dict:
 
 
 def user_contract(user: dict) -> dict:
-    return {"id": user.get("id"), "email": user.get("email"), "display_name": user.get("display_name"), "is_active": user.get("is_active", True)}
+    return {"id": user.get("id"), "email": user.get("email"), "display_name": user.get("display_name"),
+            "is_active": user.get("is_active", True), "is_guest": user.get("is_guest", False)}
 
 
 async def workspace_user(workspace_id: str, user: dict = Depends(user_context)) -> dict:
     if workspace_id not in state.workspaces:
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Workspace not found"})
+    if user.get("is_guest"):
+        if workspace_id != user.get("guest_workspace_id"):
+            raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Workspace not found"})
+        source = state.memberships.get((workspace_id, user["demo_user_id"]))
+        if not source or not source.get("enabled", True):
+            raise HTTPException(401, detail={"code": "AUTH_REQUIRED", "message": "Demo account is unavailable"})
+        m = {**source, "role": "reader", "user_id": user["id"]}
+        return {"user": user, "membership": m, "workspace_id": workspace_id,
+                "subject_user_id": user["demo_user_id"], "is_guest": True}
     m = membership(workspace_id, user)
     if not m:
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Workspace not found"})
-    return {"user": user, "membership": m, "workspace_id": workspace_id}
+    return {"user": user, "membership": m, "workspace_id": workspace_id,
+            "subject_user_id": user["id"], "is_guest": False}
 
 
 def require_role(ctx: dict, *roles: str) -> None:
@@ -250,9 +356,11 @@ def require_role(ctx: dict, *roles: str) -> None:
 
 
 async def csrf(request: Request, ctx: dict = Depends(workspace_user)) -> dict:
+    if ctx["is_guest"]:
+        raise HTTPException(403, detail={"code": "GUEST_READ_ONLY", "message": "Guest access is read only"})
     token = request.headers.get("X-CSRF-Token")
-    session_token = request.cookies.get("pharmascope_session")
-    if session_token and (not token or token != state.sessions.get(session_token, {}).get("csrf")):
+    session = session_for(request)
+    if session and (not token or not secrets.compare_digest(token, session.get("csrf", ""))):
         raise HTTPException(403, detail={"code": "FORBIDDEN", "message": "CSRF token required"})
     return ctx
 
@@ -282,6 +390,13 @@ async def request_id_middleware(request: Request, call_next):
     async with state.lock:
         before = copy.deepcopy(state_payload(state))
         try:
+            session = session_for(request)
+            if (session and session.get("guest") and request.method not in ("GET", "HEAD", "OPTIONS")
+                    and request.url.path.startswith("/api/v1/")
+                    and request.url.path not in ("/api/v1/auth/login", "/api/v1/auth/guest-login", "/api/v1/auth/logout")):
+                denied = error("GUEST_READ_ONLY", "Guest access is read only", 403)
+                denied.headers["X-Request-Id"] = request_id
+                return denied
             if state_store is None:
                 if persistence_error and request.url.path not in ("/healthz", "/readyz"):
                     return error("DATABASE_UNAVAILABLE", persistence_error, 503)
@@ -297,7 +412,9 @@ async def request_id_middleware(request: Request, call_next):
                     response = await call_next(request)
                     if response.status_code < 400:
                         record_audit(request, response.status_code)
-                        state_store.save(state_payload(state))
+                        after = state_payload(state)
+                        if after != before:
+                            state_store.save(after)
                         persistence_error = None
                     else: restore_state(state, before)
         except RepositoryConflict:
@@ -319,7 +436,7 @@ def record_audit(request: Request, status_code: int) -> None:
     parts = request.url.path.split("/")
     if "workspaces" not in parts: return
     ws = parts[parts.index("workspaces") + 1]
-    session = state.sessions.get(request.cookies.get("pharmascope_session"), {})
+    session = session_for(request) or {}
     actor = session.get("user_id") or request.headers.get("X-User-Id")
     state.audit.append({"id": uid(), "workspace_id": ws, "actor_user_id": actor,
         "action": request.method.lower() + ":" + "/".join(parts[5:]),
@@ -370,37 +487,174 @@ async def readyz() -> dict:
     return {"message": "ready", "status": "ready", "database": "postgresql" if state_store else "replay"}
 
 
+def auth_limit(key: str, *, count: bool, maximum: int, window: int) -> None:
+    stamp = time.monotonic()
+    attempts = [value for value in state.auth_attempts.get(key, []) if value > stamp - window]
+    if len(attempts) >= maximum:
+        raise HTTPException(429, detail={"code": "RATE_LIMITED", "message": "Too many sign-in attempts; try again later"})
+    if count:
+        attempts.append(stamp)
+    if attempts:
+        state.auth_attempts[key] = attempts
+    else:
+        state.auth_attempts.pop(key, None)
+    if len(state.auth_attempts) > 4096:
+        state.auth_attempts = {key: values for key, values in state.auth_attempts.items()
+                               if values and values[-1] > stamp - 900}
+
+
+def auth_ip(request: Request) -> str:
+    peer = request.client.host if request.client else "unknown"
+    if peer in ("127.0.0.1", "::1"):
+        forwarded = request.headers.get("X-Real-IP", "")
+        try:
+            return str(ipaddress.ip_address(forwarded))
+        except ValueError:
+            pass
+    return peer
+
+
+def prune_sessions() -> None:
+    stamp = datetime.now(timezone.utc).timestamp()
+    for key, session in list(state.sessions.items()):
+        if (not re.fullmatch(r"[0-9a-f]{64}", key) or session.get("expires_at", 0) < stamp
+                or (session.get("guest") and not guest_subject(session))):
+            state.sessions.pop(key, None)
+
+
+def issue_session(request: Request, response: Response, *, user_id: str,
+                  guest: bool = False, workspace_id: str | None = None) -> tuple[dict, str]:
+    prune_sessions()
+    previous = request.cookies.get("pharmascope_session")
+    if previous:
+        state.sessions.pop(session_key(previous), None)
+    active = [(key, value) for key, value in state.sessions.items() if value.get("user_id") == user_id and value.get("guest") == guest]
+    maximum = 500 if guest else 10
+    if guest and sum(bool(value.get("guest")) for value in state.sessions.values()) >= 1000:
+        raise HTTPException(429, detail={"code": "RATE_LIMITED", "message": "Guest capacity reached; try again later"})
+    if len(active) >= maximum:
+        oldest = sorted(active, key=lambda item: item[1].get("created_at", 0))[:len(active) - maximum + 1]
+        for key, _ in oldest:
+            state.sessions.pop(key, None)
+    token, csrf_token = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
+    lifetime = 3600 if guest else 43200
+    session = {"user_id": user_id, "csrf": csrf_token, "created_at": datetime.now(timezone.utc).timestamp(),
+               "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=lifetime)).timestamp()}
+    if guest:
+        session.update({"guest": True, "guest_id": uid(), "workspace_id": workspace_id})
+    state.sessions[session_key(token)] = session
+    response.set_cookie("pharmascope_session", token, httponly=True, samesite="lax",
+                        secure=os.getenv("PHARMA_COOKIE_SECURE", "0" if os.getenv("PHARMA_RUNTIME_MODE") in ("replay", "demo") else "1") == "1",
+                        max_age=lifetime, path="/")
+    return session, csrf_token
+
+
+def auth_contract(user: dict, memberships: list[dict], csrf_token: str) -> dict:
+    return {"runtime_mode": os.getenv("PHARMA_RUNTIME_MODE", "live"), "user": user_contract(user),
+            "memberships": memberships, "csrf_token": csrf_token, "is_guest": user.get("is_guest", False)}
+
+
 @app.post("/api/v1/auth/login")
-async def login(body: LoginRequest, response: Response) -> dict:
-    user = next((u for u in state.users.values() if u["email"].lower() == body.email.lower()), None)
+async def login(body: LoginRequest, request: Request, response: Response) -> dict:
+    email = body.email.strip().lower()
+    ip = auth_ip(request)
+    pair_key, ip_key = f"password:{ip}:{email}", f"password-ip:{ip}"
+    auth_limit(pair_key, count=False, maximum=5, window=900)
+    auth_limit(ip_key, count=False, maximum=30, window=900)
+    user = next((u for u in state.users.values() if u.get("email", "").lower() == email), None)
     allowed = os.getenv("PHARMA_DEMO_PASSWORD", "demo")
-    valid = verify_password(body.password, user.get("password_hash", "")) if user else False
+    valid = verify_password(body.password, user.get("password_hash") or DUMMY_PASSWORD_HASH) if user else verify_password(body.password, DUMMY_PASSWORD_HASH)
     if os.getenv("PHARMA_RUNTIME_MODE", "live") in ("replay", "demo") and user and not user.get("password_hash"):
         valid = secrets.compare_digest(body.password, allowed)
-    if not user or not user.get("is_active", True) or not valid:
+    if (not user or not user.get("is_active", True) or not valid
+            or not any(m.get("user_id") == user["id"] and m.get("enabled", True) for m in state.memberships.values())):
+        auth_limit(pair_key, count=True, maximum=5, window=900)
+        auth_limit(ip_key, count=True, maximum=30, window=900)
         raise HTTPException(401, detail={"code": "AUTH_REQUIRED", "message": "Invalid credentials"})
-    token, csrf_token = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
-    state.sessions[token] = {"user_id": user["id"], "csrf": csrf_token, "expires_at": (datetime.now(timezone.utc) + timedelta(hours=12)).timestamp()}
-    response.set_cookie("pharmascope_session", token, httponly=True, samesite="lax", secure=os.getenv("PHARMA_COOKIE_SECURE", "1" if os.getenv("PHARMA_RUNTIME_MODE")=="live" else "0") == "1", max_age=43200)
-    return {"runtime_mode": os.getenv("PHARMA_RUNTIME_MODE", "live"), "user": user_contract(user), "memberships": [membership_contract(m) for m in state.memberships.values() if m["user_id"] == user["id"] and m["workspace_id"] != "demo-workspace" and m.get("enabled",True)], "csrf_token": csrf_token}
+    state.auth_attempts.pop(pair_key, None)
+    session, csrf_token = issue_session(request, response, user_id=user["id"])
+    return auth_contract(user, [membership_contract(m) for m in state.memberships.values()
+                                if m["user_id"] == user["id"] and m["workspace_id"] != "demo-workspace" and m.get("enabled", True)], csrf_token)
+
+
+@app.post("/api/v1/auth/guest-login")
+async def guest_login(request: Request, response: Response) -> dict:
+    auth_limit(f"guest:{auth_ip(request)}", count=True, maximum=30, window=60)
+    configured = []
+    for workspace in state.workspaces.values():
+        user_id = selected_demo_user_id(workspace)
+        if user_id and is_public_demo_workspace(workspace) and guest_subject({"workspace_id": workspace["id"], "user_id": user_id}):
+            configured.append((workspace, user_id))
+    if not configured:
+        raise HTTPException(503, detail={"code": "DEMO_UNAVAILABLE", "message": "Demo account is not configured or available"})
+    workspace, user_id = sorted(configured, key=lambda item: item[0]["id"])[0]
+    session, csrf_token = issue_session(request, response, user_id=user_id, guest=True, workspace_id=workspace["id"])
+    guest = {"id": session["guest_id"], "email": f"guest-{session['guest_id']}@pharmascope.invalid",
+             "display_name": "游客", "is_active": True, "is_guest": True}
+    return auth_contract(guest, [{"workspace_id": workspace["id"], "workspace_name": workspace.get("name", ""), "role": "reader"}], csrf_token)
 
 
 @app.post("/api/v1/auth/logout")
 async def logout(request: Request, response: Response, csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"), _user: dict = Depends(user_context)) -> dict:
     token = request.cookies.get("pharmascope_session")
-    if token and csrf_token != state.sessions.get(token, {}).get("csrf"):
+    session = session_for(request)
+    if token and (not csrf_token or not session or not secrets.compare_digest(csrf_token, session.get("csrf", ""))):
         raise HTTPException(403, detail={"code": "FORBIDDEN", "message": "CSRF token required"})
     if token:
-        state.sessions.pop(token, None)
-    response.delete_cookie("pharmascope_session")
+        state.sessions.pop(session_key(token), None)
+    response.delete_cookie("pharmascope_session", path="/")
     return {"message": "logged out"}
 
 
 @app.get("/api/v1/auth/me")
 async def me(request: Request, user: dict = Depends(user_context)) -> dict:
-    token = request.cookies.get("pharmascope_session")
-    csrf_token = state.sessions.get(token, {}).get("csrf") if token else None
-    return {"runtime_mode": os.getenv("PHARMA_RUNTIME_MODE", "live"), "user": user_contract(user), "memberships": [membership_contract(m) for m in state.memberships.values() if m["user_id"] == user["id"] and m["workspace_id"] != "demo-workspace" and m.get("enabled",True)], "csrf_token": csrf_token}
+    session = session_for(request)
+    csrf_token = session.get("csrf") if session else None
+    if user.get("is_guest"):
+        workspace = state.workspaces[user["guest_workspace_id"]]
+        memberships = [{"workspace_id": workspace["id"], "workspace_name": workspace.get("name", ""), "role": "reader"}]
+    else:
+        memberships = [membership_contract(m) for m in state.memberships.values() if m["user_id"] == user["id"] and m["workspace_id"] != "demo-workspace" and m.get("enabled", True)]
+    return auth_contract(user, memberships, csrf_token)
+
+
+def revoke_sessions_for_user(user_id: str, *, except_key: str | None = None,
+                             guest_only: bool = False, workspace_id: str | None = None) -> None:
+    for key, session in list(state.sessions.items()):
+        if (key != except_key and session.get("user_id") == user_id
+                and (not guest_only or session.get("guest"))
+                and (workspace_id is None or session.get("workspace_id") == workspace_id)):
+            state.sessions.pop(key, None)
+
+
+def require_auth_csrf(request: Request) -> dict:
+    session = session_for(request)
+    token = request.headers.get("X-CSRF-Token")
+    if not session or not token or not secrets.compare_digest(token, session.get("csrf", "")):
+        raise HTTPException(403, detail={"code": "FORBIDDEN", "message": "CSRF token required"})
+    if session.get("guest"):
+        raise HTTPException(403, detail={"code": "GUEST_READ_ONLY", "message": "Guest access is read only"})
+    return session
+
+
+@app.post("/api/v1/auth/password")
+async def change_password(body: PasswordChangeRequest, request: Request,
+                          user: dict = Depends(user_context)) -> dict:
+    session = require_auth_csrf(request)
+    attempt_key = f"password-change:{auth_ip(request)}:{user['id']}"
+    auth_limit(attempt_key, count=False, maximum=5, window=900)
+    encoded = user.get("password_hash", "")
+    valid = verify_password(body.current_password, encoded)
+    if not encoded and os.getenv("PHARMA_RUNTIME_MODE", "live") in ("replay", "demo"):
+        valid = secrets.compare_digest(body.current_password, os.getenv("PHARMA_DEMO_PASSWORD", "demo"))
+    if not valid:
+        auth_limit(attempt_key, count=True, maximum=5, window=900)
+        raise HTTPException(401, detail={"code": "AUTH_REQUIRED", "message": "Invalid credentials"})
+    state.auth_attempts.pop(attempt_key, None)
+    user["password_hash"] = hash_password(body.new_password)
+    current = request.cookies.get("pharmascope_session")
+    revoke_sessions_for_user(user["id"], except_key=session_key(current) if current else None)
+    return {"message": "Password changed"}
 
 
 def records_for(ws: str, kind: str | None = None) -> list[dict]:
@@ -416,16 +670,19 @@ def with_projection(record: dict) -> dict:
     return p
 
 
-def sources_for(workspace_id):
+def sources_for(workspace_id, *, persist=False):
     values={}
     replay=os.getenv("PHARMA_RUNTIME_MODE","live") in ("replay","demo")
     for source in ("ctgov","pubmed"):
         key=workspace_id+":"+source
-        if key not in state.sources:
-            state.sources[key]={"workspace_id":workspace_id,"source":source,"enabled":True,
+        if key in state.sources:
+            values[source]=state.sources[key]
+        else:
+            values[source]={"workspace_id":workspace_id,"source":source,"enabled":True,
                 "configured":replay or source=="ctgov" or bool(os.getenv("NCBI_EMAIL")),
                 "state":"healthy" if replay else "unknown","last_success_at":None,"last_error_code":None,"coverage":{"records":0}}
-        values[source]=state.sources[key]
+            if persist:
+                state.sources[key]=values[source]
     return values
 
 
@@ -444,7 +701,38 @@ async def dashboard(workspace_id: str, ctx: dict = Depends(workspace_user)) -> d
 
 @app.get("/api/v1/workspaces/{workspace_id}/members")
 async def members(workspace_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    return page([{"user": user_contract(state.users.get(m["user_id"], {})), "role": m.get("role"), "enabled": m.get("enabled", True)} for (ws, _), m in state.memberships.items() if ws == workspace_id], limit, cursor)
+    if ctx["is_guest"]:
+        raise HTTPException(403, detail={"code": "FORBIDDEN", "message": "Member directory is private"})
+    allowed = None if ctx["membership"]["role"] == "admin" else ctx["user"]["id"]
+    return page([{"user": user_contract(state.users.get(m["user_id"], {})), "role": m.get("role"), "enabled": m.get("enabled", True)}
+                 for (ws, _), m in state.memberships.items() if ws == workspace_id and (allowed is None or m["user_id"] == allowed)], limit, cursor)
+
+
+def valid_email(value: str) -> str:
+    email = value.strip().lower()
+    if not re.fullmatch(r"[^\s@]{1,64}@[^\s@]{1,255}\.[^\s@.]{2,}", email):
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "A valid email address is required"})
+    return email
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/members")
+async def member_create(workspace_id: str, body: CreateMemberRequest, ctx: dict = Depends(csrf)) -> JSONResponse:
+    require_role(ctx, "admin")
+    email = valid_email(body.email)
+    if body.role not in ("reader", "analyst", "reviewer", "admin"):
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "Invalid role"})
+    if any(u.get("email", "").lower() == email for u in state.users.values()):
+        raise HTTPException(409, detail={"code": "ACCOUNT_EXISTS", "message": "Account already exists"})
+    user_id = uid()
+    user = {"id": user_id, "email": email, "display_name": body.display_name.strip(),
+            "password_hash": hash_password(body.password), "is_active": True, "created_at": now()}
+    if not user["display_name"]:
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "Display name is required"})
+    member = {"workspace_id": workspace_id, "user_id": user_id, "role": body.role,
+              "enabled": True, "created_at": now()}
+    state.users[user_id] = user
+    state.memberships[(workspace_id, user_id)] = member
+    return JSONResponse(status_code=201, content={"user": user_contract(user), "role": body.role, "enabled": True})
 
 
 @app.patch("/api/v1/workspaces/{workspace_id}/members/{user_id}")
@@ -454,13 +742,83 @@ async def member_update(workspace_id: str, user_id: str, request: Request, ctx: 
     if not m:
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Member not found"})
     payload = await request.json()
-    if not payload:
-        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "Empty patch"})
-    if "role" in payload and payload["role"] in ("reader", "analyst", "reviewer", "admin"):
-        m["role"] = payload["role"]
+    if not isinstance(payload, dict) or not payload or set(payload) - {"role", "enabled"}:
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "Only role and enabled can be changed"})
+    if "role" in payload and payload["role"] not in ("reader", "analyst", "reviewer", "admin"):
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "Invalid role"})
+    if "enabled" in payload and not isinstance(payload["enabled"], bool):
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "enabled must be a boolean"})
+    new_role = payload.get("role", m.get("role"))
+    new_enabled = payload.get("enabled", m.get("enabled", True))
+    if m.get("role") == "admin" and m.get("enabled", True) and (new_role != "admin" or not new_enabled):
+        other_admins = [other for (ws, uid), other in state.memberships.items()
+                        if ws == workspace_id and uid != user_id and other.get("role") == "admin"
+                        and other.get("enabled", True) and state.users.get(uid, {}).get("is_active", True)]
+        if not other_admins:
+            raise HTTPException(409, detail={"code": "LAST_ADMIN", "message": "At least one active administrator is required"})
+    changed = new_role != m.get("role") or new_enabled != m.get("enabled", True)
+    m["role"] = new_role
     if "enabled" in payload:
-        m["enabled"] = bool(payload["enabled"])
+        m["enabled"] = payload["enabled"]
+    if changed:
+        revoke_sessions_for_user(user_id)
     return {**m, "user": user_contract(state.users.get(user_id, {}))}
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/members/{user_id}/password")
+async def member_password_reset(workspace_id: str, user_id: str, body: PasswordResetRequest,
+                                ctx: dict = Depends(csrf)) -> dict:
+    require_role(ctx, "admin")
+    member = state.memberships.get((workspace_id, user_id))
+    user = state.users.get(user_id)
+    if not member or not user:
+        raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Member not found"})
+    # Passwords are global account credentials. A workspace administrator may
+    # reset one only if they administer every workspace that account can enter.
+    for (other_workspace, other_user), other_member in state.memberships.items():
+        if other_user != user_id or not other_member.get("enabled", True):
+            continue
+        actor_member = state.memberships.get((other_workspace, ctx["user"]["id"]))
+        if not actor_member or not actor_member.get("enabled", True) or actor_member.get("role") != "admin":
+            raise HTTPException(403, detail={"code": "FORBIDDEN", "message": "Account belongs to another workspace"})
+    user["password_hash"] = hash_password(body.new_password)
+    revoke_sessions_for_user(user_id)
+    return {"message": "Password reset"}
+
+
+def demo_account_contract(workspace_id: str) -> dict:
+    selected = selected_demo_user_id(state.workspaces[workspace_id])
+    user = state.users.get(selected) if selected else None
+    member = state.memberships.get((workspace_id, selected)) if selected else None
+    return {"user_id": selected, "user": user_contract(user) if user else None,
+            "enabled": bool(is_public_demo_workspace(state.workspaces[workspace_id]) and user
+                            and user.get("is_active", True) and member and member.get("enabled", True))}
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/settings/demo-account")
+async def demo_account_get(workspace_id: str, ctx: dict = Depends(workspace_user)) -> dict:
+    require_role(ctx, "admin")
+    return demo_account_contract(workspace_id)
+
+
+@app.patch("/api/v1/workspaces/{workspace_id}/settings/demo-account")
+async def demo_account_set(workspace_id: str, body: DemoAccountRequest,
+                           ctx: dict = Depends(csrf)) -> dict:
+    require_role(ctx, "admin")
+    if body.user_id is not None:
+        user = state.users.get(body.user_id)
+        member = state.memberships.get((workspace_id, body.user_id))
+        if not user or not user.get("is_active", True) or not member or not member.get("enabled", True):
+            raise HTTPException(422, detail={"code": "INVALID_DEMO_ACCOUNT", "message": "Select an active member of this workspace"})
+    previous = selected_demo_user_id(state.workspaces[workspace_id])
+    for workspace in state.workspaces.values():
+        workspace["public_demo"] = workspace["id"] == workspace_id
+    state.workspaces[workspace_id]["demo_user_id"] = body.user_id
+    if previous != body.user_id or any(session.get("guest") and session.get("workspace_id") != workspace_id for session in state.sessions.values()):
+        for key, session in list(state.sessions.items()):
+            if session.get("guest"):
+                state.sessions.pop(key, None)
+    return demo_account_contract(workspace_id)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/drugs")
@@ -622,7 +980,7 @@ async def source_update(workspace_id: str, source: str, request: Request, ctx: d
     p = await request.json()
     if not isinstance(p.get("enabled"), bool):
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "enabled is required"})
-    sources_for(workspace_id)[source].update({"enabled": p["enabled"]})
+    sources_for(workspace_id, persist=True)[source].update({"enabled": p["enabled"]})
     return next(item for item in source_health_payload(workspace_id) if item["source"] == source)
 
 
@@ -700,7 +1058,7 @@ async def _execute_source_sync(job_id: str, request_payload: dict[str, Any]) -> 
             adapter = ClinicalTrialsGovAdapter() if source_name in ("ctgov", "clinicaltrials_gov") else PubMedAdapter()
             if request_payload.get("health_check"):
                 result=await adapter.health()
-                sources_for(ws)[source_name].update(result)
+                sources_for(ws, persist=True)[source_name].update(result)
                 coverage.append({"source":source_name,"state":"complete" if result["state"]=="healthy" else "failed","error_code":result.get("last_error_code"),"records":0})
                 continue
             if request_payload.get("mode")=="refresh_linked":
@@ -732,19 +1090,19 @@ async def _execute_source_sync(job_id: str, request_payload: dict[str, Any]) -> 
                 checkpoint()
             failures=page_result.coverage.get("errors",[])
             truncated=bool(page_result.next_cursor) or bool(page_result.coverage.get("truncated"))
-            health=sources_for(ws)[source_name]
+            health=sources_for(ws, persist=True)[source_name]
             health.update(state="degraded" if failures and processed else "unavailable" if failures else "healthy",configured=True,last_error_code=failures[0] if failures else None,coverage={"records":processed})
             if processed or not failures: health["last_success_at"]=now()
             coverage.append({"source":source_name,"state":"failed" if failures and not processed else "partial" if failures or truncated else "complete", "records":processed,"truncated":truncated,"next_cursor":page_result.next_cursor,"error_code":failures[0] if failures else None,"limitations":failures})
         except SourceError as exc:
             source_key = "ctgov" if source_name in ("ctgov", "clinicaltrials_gov") else source_name
             if source_key in sources_for(ws):
-                sources_for(ws)[source_key].update({"state": "unavailable", "configured": exc.code != "configuration", "last_error_code": exc.code})
+                sources_for(ws, persist=True)[source_key].update({"state": "unavailable", "configured": exc.code != "configuration", "last_error_code": exc.code})
             coverage.append({"source": source_key, "state": "failed", "error_code": exc.code, "message": str(exc)})
         except Exception as exc:
             key_name = "ctgov" if source_name in ("ctgov", "clinicaltrials_gov") else source_name
             if key_name in sources_for(ws):
-                sources_for(ws)[key_name].update({"state": "unavailable", "last_error_code": "adapter_error"})
+                sources_for(ws, persist=True)[key_name].update({"state": "unavailable", "last_error_code": "adapter_error"})
             coverage.append({"source": key_name, "state": "failed", "error_code": "adapter_error", "message": "Source adapter failed; check configuration and source status"})
         finally:
             if adapter is not None and hasattr(adapter, "aclose"):
@@ -1096,6 +1454,13 @@ def get_run(workspace_id: str, run_id: str) -> dict:
     return r
 
 
+def visible_run(workspace_id: str, run_id: str, ctx: dict) -> dict:
+    run = get_run(workspace_id, run_id)
+    if ctx["is_guest"] and run.get("created_by") != ctx["subject_user_id"]:
+        raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Research run not found"})
+    return run
+
+
 def usage_contract(usage):
     base={"tool_calls":0,"model_calls":0,"input_tokens":None,"output_tokens":None,"usage_quality":"unknown","estimated_cost":None,"currency":None}
     base.update(usage or {})
@@ -1109,14 +1474,16 @@ def run_contract(run: dict) -> dict:
 
 @app.get("/api/v1/workspaces/{workspace_id}/research/runs")
 async def runs_list(workspace_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    require_role(ctx,"analyst","reviewer","admin")
-    return page([run_contract(r) for r in sorted([r for r in state.runs.values() if r.get("workspace_id") == workspace_id], key=lambda x: x.get("created_at", ""), reverse=True)], limit, cursor)
+    if not ctx["is_guest"]: require_role(ctx,"analyst","reviewer","admin")
+    return page([run_contract(r) for r in sorted([r for r in state.runs.values()
+             if r.get("workspace_id") == workspace_id and (not ctx["is_guest"] or r.get("created_by") == ctx["subject_user_id"])],
+             key=lambda x: x.get("created_at", ""), reverse=True)], limit, cursor)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/research/runs/{run_id}")
 async def run_get(workspace_id: str, run_id: str, ctx: dict = Depends(workspace_user)) -> dict:
-    require_role(ctx,"analyst","reviewer","admin")
-    return run_contract(get_run(workspace_id, run_id))
+    if not ctx["is_guest"]: require_role(ctx,"analyst","reviewer","admin")
+    return run_contract(visible_run(workspace_id, run_id, ctx))
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/research/runs/{run_id}/cancel")
@@ -1158,8 +1525,8 @@ async def run_clarify(workspace_id: str, run_id: str, request: Request, ctx: dic
 
 @app.get("/api/v1/workspaces/{workspace_id}/research/runs/{run_id}/tool-calls")
 async def run_tools(workspace_id: str, run_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    require_role(ctx,"analyst","reviewer","admin")
-    get_run(workspace_id, run_id)
+    if not ctx["is_guest"]: require_role(ctx,"analyst","reviewer","admin")
+    visible_run(workspace_id, run_id, ctx)
     rows=[]
     for call in state.tool_calls.get(run_id,[]):
         rows.append({"id":call["id"],"workspace_id":workspace_id,"created_at":call.get("created_at",now()),"run_id":run_id,
@@ -1172,14 +1539,18 @@ async def run_tools(workspace_id: str, run_id: str, limit: int = 20, cursor: str
 
 @app.get("/api/v1/workspaces/{workspace_id}/research/runs/{run_id}/events")
 async def run_stream(workspace_id: str, run_id: str, request: Request, last_event_id: str | None = Header(default=None, alias="Last-Event-ID"), ctx: dict = Depends(workspace_user)) -> StreamingResponse:
-    require_role(ctx,"analyst","reviewer","admin")
-    get_run(workspace_id, run_id)
+    if not ctx["is_guest"]: require_role(ctx,"analyst","reviewer","admin")
+    visible_run(workspace_id, run_id, ctx)
     try: start = int(last_event_id or request.query_params.get("after", "0"))
     except ValueError: raise HTTPException(422, detail={"code":"VALIDATION_ERROR","message":"Invalid Last-Event-ID"})
     async def stream() -> AsyncIterator[str]:
         position=start
         await asyncio.sleep(0.01)
         while True:
+            if ctx["is_guest"] and not state_store:
+                current_session = session_for(request)
+                if not current_session or not guest_subject(current_session):
+                    break
             if state_store:
                 # Use a separate repository instance so streaming never changes
                 # the request/worker unit-of-work baseline.
@@ -1187,6 +1558,12 @@ async def run_stream(workspace_id: str, run_id: str, request: Request, last_even
                 store=PersistentStateStore(state_store.url)
                 try: snapshot=store.load() or {}; rows=snapshot.get("run_events",{}).get(run_id,[]); status=snapshot.get("runs",{}).get(run_id,{}).get("status")
                 finally: store.engine.dispose()
+                if ctx["is_guest"] and not guest_session_valid_in_payload(
+                    request.cookies.get("pharmascope_session"), snapshot,
+                    guest_id=ctx["user"]["id"], workspace_id=workspace_id,
+                    subject_user_id=ctx["subject_user_id"]
+                ):
+                    break
             else:
                 rows=list(state.run_events.get(run_id,[])); status=state.runs[run_id]["status"]
             for event in rows:
@@ -1208,6 +1585,8 @@ def report_for(workspace_id: str, report_id: str) -> dict:
 
 
 def report_draft_visible(report,ctx):
+    if ctx["is_guest"]:
+        return report["created_by"] == ctx["subject_user_id"]
     return ctx["membership"]["role"] in ("reviewer","admin") or report["created_by"]==ctx["user"]["id"] and ctx["membership"]["role"]!="reader"
 
 
@@ -1405,7 +1784,7 @@ def schedule_occurrences(payload: dict) -> list[dict]:
 
 @app.get("/api/v1/workspaces/{workspace_id}/subscriptions")
 async def subscriptions(workspace_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    return page([s for s in state.subscriptions.values() if s["workspace_id"] == workspace_id and (s["owner_id"]==ctx["user"]["id"] or ctx["membership"]["role"]=="admin")], limit, cursor)
+    return page([s for s in state.subscriptions.values() if s["workspace_id"] == workspace_id and (s["owner_id"]==ctx["subject_user_id"] or ctx["membership"]["role"]=="admin")], limit, cursor)
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/subscriptions")
@@ -1425,7 +1804,7 @@ async def subscription_preview(workspace_id: str, request: Request, ctx: dict = 
 @app.get("/api/v1/workspaces/{workspace_id}/subscriptions/{subscription_id}")
 async def subscription_get(workspace_id: str, subscription_id: str, ctx: dict = Depends(workspace_user)) -> dict:
     s = state.subscriptions.get(subscription_id)
-    if not s or s["workspace_id"] != workspace_id or (s["owner_id"]!=ctx["user"]["id"] and ctx["membership"]["role"]!="admin"): raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Subscription not found"})
+    if not s or s["workspace_id"] != workspace_id or (s["owner_id"]!=ctx["subject_user_id"] and ctx["membership"]["role"]!="admin"): raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Subscription not found"})
     return s
 
 
@@ -1453,7 +1832,7 @@ async def subscription_trigger(workspace_id: str, subscription_id: str, ctx: dic
 
 @app.get("/api/v1/workspaces/{workspace_id}/inbox")
 async def inbox(workspace_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    rows = [d for d in state.deliveries.values() if d["workspace_id"] == workspace_id and d["recipient_user_id"] == ctx["user"]["id"]]; return page(rows, limit, cursor)
+    rows = [d for d in state.deliveries.values() if d["workspace_id"] == workspace_id and d["recipient_user_id"] == ctx["subject_user_id"]]; return page(rows, limit, cursor)
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/inbox/{delivery_id}/read")
@@ -1465,13 +1844,13 @@ async def inbox_read(workspace_id: str, delivery_id: str, ctx: dict = Depends(cs
 
 @app.get("/api/v1/workspaces/{workspace_id}/deliveries")
 async def deliveries(workspace_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    return page([d for d in state.deliveries.values() if d["workspace_id"] == workspace_id and (d["recipient_user_id"]==ctx["user"]["id"] or ctx["membership"]["role"]=="admin")], limit, cursor)
+    return page([d for d in state.deliveries.values() if d["workspace_id"] == workspace_id and (d["recipient_user_id"]==ctx["subject_user_id"] or ctx["membership"]["role"]=="admin")], limit, cursor)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/deliveries/{delivery_id}")
 async def delivery_get(workspace_id: str, delivery_id: str, ctx: dict = Depends(workspace_user)) -> dict:
     d = state.deliveries.get(delivery_id)
-    if not d or d["workspace_id"] != workspace_id or (d["recipient_user_id"]!=ctx["user"]["id"] and ctx["membership"]["role"]!="admin"): raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Delivery not found"})
+    if not d or d["workspace_id"] != workspace_id or (d["recipient_user_id"]!=ctx["subject_user_id"] and ctx["membership"]["role"]!="admin"): raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Delivery not found"})
     return d
 
 

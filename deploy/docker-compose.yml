@@ -32,6 +32,7 @@ services:
     environment:
       PHARMA_DATABASE_URL: ${PHARMA_DATABASE_URL:?Set PHARMA_DATABASE_URL in the environment file}
       DATABASE_URL: ${PHARMA_DATABASE_URL:?Set PHARMA_DATABASE_URL in the environment file}
+      PHARMA_ALLOW_DEV_HEADER: "0"
     command: ["uvicorn", "backend.pharma_scope_app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     depends_on:
       db:

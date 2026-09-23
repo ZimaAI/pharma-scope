@@ -35,7 +35,7 @@ export default function ReportsPage() {
       title="报告中心"
       description="报告版本、证据核验和审核发布状态。"
       actions={
-        <Link className="ps-btn primary" href="/research/new">
+        <Link className="ps-btn primary" href="/research/new" data-guest-mutation>
           ＋ 新建研究
         </Link>
       }
@@ -62,7 +62,7 @@ export default function ReportsPage() {
             title="还没有报告"
             detail="完成一个研究任务后，报告草稿会出现在这里。"
             action={
-              <Link className="ps-btn primary" href="/research/new">
+              <Link className="ps-btn primary" href="/research/new" data-guest-mutation>
                 开始研究
               </Link>
             }

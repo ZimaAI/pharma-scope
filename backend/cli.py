@@ -7,7 +7,7 @@ from .repository import repository_from_env, restore_state, state_payload
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=['init','add-user','seed-demo'])
+    parser.add_argument('action',choices=['init','add-user','seed-demo','set-demo'])
     parser.add_argument('--email')
     parser.add_argument('--display-name',default='Administrator')
     parser.add_argument('--workspace-name',default='PharmaScope')
@@ -24,6 +24,20 @@ def main():
         if args.action=='seed-demo':
             if os.getenv('PHARMA_RUNTIME_MODE') not in ('replay','demo'): parser.error('seed-demo requires explicit replay mode')
             if existing: parser.error('Database is already initialized; seed-demo never overwrites data')
+        elif args.action=='set-demo':
+            if not existing: parser.error('Database is not initialized')
+            if not args.workspace_id or args.workspace_id not in state.workspaces:
+                parser.error('--workspace-id must identify an existing workspace')
+            if not args.email: parser.error('--email is required')
+            selected=next((u for u in state.users.values() if u.get('email','').lower()==args.email.strip().lower()),None)
+            member=state.memberships.get((args.workspace_id,selected['id'])) if selected else None
+            if not selected or not selected.get('is_active',True) or not member or not member.get('enabled',True):
+                parser.error('Demo account must be an active member of the workspace')
+            for workspace in state.workspaces.values():
+                workspace['public_demo']=workspace['id']==args.workspace_id
+            state.workspaces[args.workspace_id]['demo_user_id']=selected['id']
+            for key,session in list(state.sessions.items()):
+                if session.get('guest'): state.sessions.pop(key,None)
         else:
             if not args.email or '@' not in args.email: parser.error('--email is required')
             if any(u.get('email','').lower()==args.email.lower() for u in state.users.values()): parser.error('Account exists; no changes made')

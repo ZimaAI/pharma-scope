@@ -115,7 +115,7 @@ export default function SubscriptionsPage() {
       title="我的订阅"
       description="按 IANA 时区调度研究；审核发布后发送站内通知。"
       actions={
-        <button className="ps-btn primary" onClick={() => setShowForm(!showForm)}>
+        <button className="ps-btn primary" data-guest-mutation onClick={() => setShowForm(!showForm)}>
           ＋ 新建订阅
         </button>
       }
@@ -127,7 +127,7 @@ export default function SubscriptionsPage() {
         </div>
       )}
       {showForm && (
-        <form className="ps-card ps-card-body" onSubmit={create}>
+        <form className="ps-card ps-card-body" data-guest-mutation onSubmit={create}>
           <h2>新建订阅</h2>
           <div className="ps-form-grid">
             <label>
@@ -242,10 +242,10 @@ export default function SubscriptionsPage() {
                   status={item.enabled ? "已启用" : "已暂停"}
                   tone={item.enabled ? "success" : "warning"}
                 />
-                <button className="ps-btn tiny" disabled={busy} onClick={() => change(item, false)}>
+                <button className="ps-btn tiny" data-guest-mutation disabled={busy} onClick={() => change(item, false)}>
                   {item.enabled ? "暂停" : "启用"}
                 </button>
-                <button className="ps-btn tiny" disabled={busy} onClick={() => change(item, true)}>
+                <button className="ps-btn tiny" data-guest-mutation disabled={busy} onClick={() => change(item, true)}>
                   立即生成
                 </button>
               </div>

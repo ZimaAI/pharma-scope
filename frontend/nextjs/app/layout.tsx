@@ -15,7 +15,14 @@ export default function RootLayout({
 
   return (
     <html lang="zh-CN">
-      <body>{children}</body>
+      <body>
+        {children}
+        <footer className="ps-site-footer">
+          <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">
+            浙ICP备2026076087号-1
+          </a>
+        </footer>
+      </body>
     </html>
   );
 }

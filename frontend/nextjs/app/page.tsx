@@ -72,9 +72,9 @@ export default function DashboardPage() {
       <section className="ps-card ps-hero-card">
         <div>
           <span className="ps-kicker">RESEARCH INTELLIGENCE WORKSPACE</span>
-          <h2>今天想了解什么？</h2>
+          <h2><span className="ps-normal-only">今天想了解什么？</span><span className="ps-guest-only">浏览演示研究资料</span></h2>
           <p>从药物、临床试验和文献开始，建立可追溯的变化记录与研究报告。</p>
-          <div className="ps-hero-search">
+          <div className="ps-hero-search" data-guest-mutation>
             <span aria-hidden>⌕</span>
             <input
               value={question}
@@ -186,7 +186,7 @@ export default function DashboardPage() {
                 <div className="ps-empty">
                   <h3>尚未同步变化</h3>
                   <p>完成来源同步后，这里会显示工作区内的新观察。</p>
-                  <Link href="/settings" className="ps-btn">
+                  <Link href="/settings" className="ps-btn" data-guest-mutation>
                     查看来源设置
                   </Link>
                 </div>
@@ -200,7 +200,7 @@ export default function DashboardPage() {
                   <h2>我的研究任务</h2>
                   <small>当前工作区可访问的运行</small>
                 </div>
-                <Link href="/research/new" className="ps-btn tiny">
+                <Link href="/research/new" className="ps-btn tiny" data-guest-mutation>
                   新建
                 </Link>
               </div>
@@ -242,7 +242,7 @@ export default function DashboardPage() {
                   <h2>来源健康</h2>
                   <small>状态来自最近一次同步</small>
                 </div>
-                <Link href="/settings" className="ps-btn tiny">
+                <Link href="/settings" className="ps-btn tiny" data-guest-mutation>
                   管理
                 </Link>
               </div>

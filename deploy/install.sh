@@ -21,7 +21,7 @@ ENV_FILE="$(realpath -- "$ENV_FILE")"
 id "$TARGET_USER" >/dev/null || die "Unknown deployment user: $TARGET_USER"
 TARGET_GROUP="$(id -gn "$TARGET_USER")"
 PYTHON="$REPO_ROOT/.venv/bin/python"
-RUNTIME_MODE="$($PYTHON "$SCRIPT_DIR/env-run.py" "$ENV_FILE" "$PYTHON" -c 'import os; mode=os.environ.get("PHARMA_RUNTIME_MODE"); assert mode in ("replay", "live"), "PHARMA_RUNTIME_MODE must be replay or live"; assert os.environ.get("PHARMA_DATABASE_URL", "").startswith("postgres"), "PHARMA_DATABASE_URL must configure PostgreSQL"; assert os.environ.get("PHARMA_COOKIE_SECURE") == "1", "Public HTTPS deployment requires PHARMA_COOKIE_SECURE=1"; assert os.environ.get("PHARMA_PUBLIC_ORIGIN") == "https://pharmascope.zimagent.top", "Set PHARMA_PUBLIC_ORIGIN=https://pharmascope.zimagent.top"; print(mode)')"
+RUNTIME_MODE="$($PYTHON "$SCRIPT_DIR/env-run.py" "$ENV_FILE" "$PYTHON" "$SCRIPT_DIR/check-public-config.py")"
 for command in nginx curl systemctl runuser; do command -v "$command" >/dev/null || die "Missing prerequisite: $command"; done
 if ss -ltn "sport = :$API_PORT" | tail -n +2 | grep -q LISTEN; then
   pgrep -af "uvicorn.*backend\.pharma_scope_app:app.*--port ${API_PORT}" >/dev/null || die "Port $API_PORT belongs to another project."

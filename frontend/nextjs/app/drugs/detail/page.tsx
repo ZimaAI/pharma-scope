@@ -86,6 +86,7 @@ export default function DrugDetailPage() {
                 <Link
                   href={`/research/new?drug_id=${encodeURIComponent(drug.id)}`}
                   className="ps-btn primary"
+                  data-guest-mutation
                 >
                   基于此对象发起研究
                 </Link>

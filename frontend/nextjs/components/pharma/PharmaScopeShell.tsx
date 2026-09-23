@@ -9,6 +9,7 @@ import {
   IS_REPLAY_MODE,
   logout as apiLogout,
   AuthMe,
+  isGuest,
   selectWorkspace,
   PharmaApiError,
 } from "@/components/pharma/pharmaApi";
@@ -45,8 +46,15 @@ export default function PharmaScopeShell({ children, title, description, actions
   useEffect(() => {
     getAuthMe()
       .then(setAuth)
-      .catch((error) => setAuthError(formatApiError(error)));
+      .catch((error) => {
+        if (error instanceof PharmaApiError && error.status === 401) {
+          window.location.replace("/login");
+          return;
+        }
+        setAuthError(formatApiError(error));
+      });
   }, []);
+  const guest = isGuest(auth);
   const membership =
     auth?.memberships?.find(
       (item) =>
@@ -62,7 +70,7 @@ export default function PharmaScopeShell({ children, title, description, actions
     auth?.user?.name ||
     auth?.user?.email ||
     (IS_REPLAY_MODE ? "演示研究员" : "未登录");
-  const modeLabel = !auth ? "模式待确认" : IS_REPLAY_MODE ? "REPLAY / DEMO" : "LIVE";
+  const modeLabel = guest ? "游客 · 只读" : !auth ? "模式待确认" : IS_REPLAY_MODE ? "REPLAY / DEMO" : "LIVE";
   async function handleLogout() {
     try {
       await apiLogout();
@@ -72,8 +80,21 @@ export default function PharmaScopeShell({ children, title, description, actions
     }
   }
 
+  if (!auth) {
+    return (
+      <div className="ps-auth-check" role="status">
+        {authError ? (
+          <>
+            <p>身份状态暂不可用：{authError}</p>
+            <Link href="/login" className="ps-btn primary">前往登录</Link>
+          </>
+        ) : "正在验证登录状态…"}
+      </div>
+    );
+  }
+
   return (
-    <div className="ps-app">
+    <div className={`ps-app ${guest ? "ps-guest" : ""}`}>
       <aside className={`ps-sidebar ${sidebarOpen ? "open" : ""}`} aria-label="主导航">
         <div className="ps-brand">
           <div className="ps-brand-mark">P</div>
@@ -88,6 +109,7 @@ export default function PharmaScopeShell({ children, title, description, actions
             aria-label="切换工作区"
             className="ps-input"
             value={membership?.workspace_id || ""}
+            disabled={guest}
             onChange={(e) => selectWorkspace(e.target.value)}
           >
             {auth?.memberships
@@ -115,7 +137,7 @@ export default function PharmaScopeShell({ children, title, description, actions
             </Link>
           ))}
           <div className="ps-nav-label ps-nav-label-spaced">研究</div>
-          {navItems.slice(5).map((item) => (
+          {navItems.slice(5).filter((item) => !guest || item.href !== "/research/new").map((item) => (
             <Link
               key={item.href}
               href={item.href}
@@ -138,30 +160,30 @@ export default function PharmaScopeShell({ children, title, description, actions
                 : "数据来自已配置的真实 API 来源。"}
             </span>
           </div>
-          <Link
-            href="/workspace"
-            className={`ps-nav-link ${isActive(pathname, "/workspace") ? "active" : ""}`}
-          >
-            <span className="ps-nav-icon" aria-hidden>
-              ▦
-            </span>
-            <span>工作区与关联审核</span>
-          </Link>
-          <Link
-            href="/settings"
-            className={`ps-nav-link ${isActive(pathname, "/settings") ? "active" : ""}`}
-          >
-            <span className="ps-nav-icon" aria-hidden>
-              ⚙
-            </span>
-            <span>来源与设置</span>
-          </Link>
+          {!guest && (
+            <>
+              <Link
+                href="/workspace"
+                className={`ps-nav-link ${isActive(pathname, "/workspace") ? "active" : ""}`}
+              >
+                <span className="ps-nav-icon" aria-hidden>▦</span>
+                <span>工作区与关联审核</span>
+              </Link>
+              <Link
+                href="/settings"
+                className={`ps-nav-link ${isActive(pathname, "/settings") ? "active" : ""}`}
+              >
+                <span className="ps-nav-icon" aria-hidden>⚙</span>
+                <span>来源与设置</span>
+              </Link>
+            </>
+          )}
           <div className="ps-user">
             <div className="ps-avatar">{userName.slice(0, 1)}</div>
             <div>
               <strong>{userName}</strong>
               <small>
-                {membership?.role || (IS_REPLAY_MODE ? "reader" : "未验证权限")} · {workspaceName}
+                {guest ? "游客只读" : membership?.role || "未验证权限"} · {workspaceName}
               </small>
             </div>
             <button type="button" aria-label="退出登录" onClick={handleLogout}>
@@ -203,32 +225,32 @@ export default function PharmaScopeShell({ children, title, description, actions
           <div className={`ps-mode-banner ${IS_REPLAY_MODE ? "" : "live"}`}>
             <span>
               <i aria-hidden>ⓘ</i>{" "}
-              {!auth
-                ? "连接 API 以确认运行模式和权限"
+              {guest
+                ? "游客只读模式 · 正在浏览管理员指定账号的演示数据"
                 : IS_REPLAY_MODE
                   ? "当前为 REPLAY / DEMO 模式 · 所有对象均为虚构资料"
                   : "当前为 LIVE 模式 · 数据由 API 和已配置来源提供"}
             </span>
-            <Link href="/settings">查看数据范围与来源 →</Link>
+            {!guest && <Link href="/settings">查看数据范围与来源 →</Link>}
           </div>
-          {authError && !IS_REPLAY_MODE && (
-            <div className="ps-callout amber" role="status">
-              身份状态暂不可用：{authError}。
-              <Link href="/login" className="ps-text-link">
-                前往登录
-              </Link>
+          {guest && ["/research/new", "/workspace", "/settings"].includes(pathname) ? (
+            <div className="ps-callout" role="status">
+              游客只能浏览演示数据。请从左侧导航查看已有档案、变化、研究报告和订阅。
             </div>
+          ) : (
+            <>
+              {(title || description || actions) && (
+                <div className="ps-page-head">
+                  <div>
+                    <h1>{title}</h1>
+                    {description && <p>{description}</p>}
+                  </div>
+                  {actions && <div className="ps-page-actions">{actions}</div>}
+                </div>
+              )}
+              {children}
+            </>
           )}
-          {(title || description || actions) && (
-            <div className="ps-page-head">
-              <div>
-                <h1>{title}</h1>
-                {description && <p>{description}</p>}
-              </div>
-              {actions && <div className="ps-page-actions">{actions}</div>}
-            </div>
-          )}
-          {children}
         </main>
       </div>
       {sidebarOpen && (

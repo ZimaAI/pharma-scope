@@ -35,7 +35,7 @@ export function formatApiError(error: unknown): string {
   return `${messages[error.status] || error.message} · ${error.code || error.status}${error.payload.message ? `：${error.payload.message}` : ""}${error.requestId ? `（request_id: ${error.requestId}）` : ""}`;
 }
 export type AuthMe = {
-  user: { id: string; email?: string; display_name?: string; name?: string };
+  user: { id: string; email?: string; display_name?: string; name?: string; is_guest?: boolean };
   memberships: Array<{
     workspace_id: string;
     workspace_name?: string;
@@ -45,7 +45,10 @@ export type AuthMe = {
   }>;
   csrf_token?: string;
   runtime_mode?: string;
+  is_guest?: boolean;
 };
+export const isGuest = (auth: AuthMe | null | undefined) =>
+  auth?.is_guest === true || auth?.user?.is_guest === true;
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method || "GET").toUpperCase();
   const headers = new Headers(init?.headers);
@@ -84,6 +87,25 @@ export async function getRuntimeMode() {
   return IS_REPLAY_MODE;
 }
 let authPromise: Promise<AuthMe> | undefined;
+export function clearAuthCache() {
+  authPromise = undefined;
+}
+export async function loginAsGuest() {
+  clearAuthCache();
+  return apiFetch<AuthMe>("/api/v1/auth/guest-login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+}
+export async function loginWithPassword(email: string, password: string) {
+  clearAuthCache();
+  return apiFetch<AuthMe>("/api/v1/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+}
 export function getAuthMe(): Promise<AuthMe> {
   if (!authPromise)
     authPromise = apiFetch<AuthMe>("/api/v1/auth/me")
@@ -101,7 +123,7 @@ export async function logout() {
   await apiFetch("/api/v1/auth/logout", { method: "POST" });
   sessionStorage.removeItem("pharmascope_csrf");
   sessionStorage.removeItem("pharmascope_workspace");
-  authPromise = undefined;
+  clearAuthCache();
 }
 export function selectWorkspace(id: string) {
   sessionStorage.setItem("pharmascope_workspace", id);
@@ -119,7 +141,11 @@ export async function workspacePath(path = ""): Promise<string> {
   return `/api/v1/workspaces/${encodeURIComponent(membership.workspace_id)}${path}`;
 }
 export async function workspaceFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  return apiFetch<T>(await workspacePath(path), init);
+  const workspace = await workspacePath(path);
+  const method = (init?.method || "GET").toUpperCase();
+  if (isGuest(await getAuthMe()) && !["GET", "HEAD", "OPTIONS"].includes(method))
+    throw new PharmaApiError(403, { code: "GUEST_READ_ONLY", message: "游客只能浏览演示数据" });
+  return apiFetch<T>(workspace, init);
 }
 export const jsonBody = (
   body: unknown,

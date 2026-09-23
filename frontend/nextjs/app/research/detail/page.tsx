@@ -123,6 +123,7 @@ export default function ResearchDetailPage() {
         <>
           <button
             className="ps-btn"
+            data-guest-mutation
             disabled={busy || !run || terminal.includes(run.status)}
             onClick={() => mutate("cancel")}
           >
@@ -130,6 +131,7 @@ export default function ResearchDetailPage() {
           </button>
           <button
             className="ps-btn"
+            data-guest-mutation
             disabled={busy || !run || !terminal.includes(run.status)}
             onClick={() => mutate("retry")}
           >

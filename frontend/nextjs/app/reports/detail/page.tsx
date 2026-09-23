@@ -193,7 +193,7 @@ export default function ReportDetailPage() {
               )}
             </div>
           </article>
-          <section className="ps-card">
+          <section className="ps-card" data-guest-mutation>
             <div className="ps-card-head">
               <h2>审核与发布</h2>
             </div>

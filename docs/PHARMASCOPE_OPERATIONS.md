@@ -6,6 +6,12 @@
 
 配置示例按用途拆开：`.env.example.development` 使用 `pharmascope_dev`；`.env.example.test` 使用独立测试库并在运行中创建临时 schema；`.env.example.live` 是生产模板；`.env.example.demo` 是 Compose 演示环境。真实密码保存在 Git 外。生产与演示必须使用不同数据库或不同实例。
 
+## 游客和账号管理
+
+公开首页进入登录页。游客登录创建独立的只读会话，只能读取管理员指定演示账号所属工作区的数据；该账号本人仍可用密码按其角色登录。管理员在“工作区”页面选择演示账号，也可以用 `python -m backend.cli set-demo --workspace-id <UUID> --email <账号邮箱>` 设置。演示账号必须属于目标工作区且处于启用状态。公开演示应使用专用工作区，确认其中的报告、证据和记录可以公开展示后再指定账号。
+
+管理员可管理成员角色与启用状态，成员可以改自己的密码；改密、停用和演示账号切换应撤销相应的旧会话。浏览器隐藏游客写入控件，API 同时执行角色、游客只读、会话和 CSRF 检查。面向公网运行时保持 `PHARMA_ALLOW_DEV_HEADER=0`、安全 Cookie 和同源 HTTPS，不在 Git 或静态网页中存储账号密码。
+
 ## 本地开发
 
 ```bash
@@ -72,7 +78,7 @@ SMTP 默认 `PH_REAL_EMAIL_ENABLED=false`、`PH_SMTP_DRY_RUN=true`。开启 dry-
 
 `make test`、`make test-e2e`、`make verify-docs`、生产构建和 `bash scripts/test_postgres.sh` 是不同验证层；原型 screenshot 不能替代正式 E2E。`deploy/proxy-smoke.py` 验证独立真实 Nginx/TLS/静态资源/认证 SSE，但不能替代公网配置安装。
 
-本次执行环境没有免密码 sudo 和 Docker socket 权限，因此不能安装最新系统服务、reload 系统 Nginx 或执行 Docker 镜像构建。公网 `https://pharmascope.zimagent.top` 已有有效 HTTPS 与 replay 前端/API；当前公网 `/readyz` 为旧 Nginx 的 404。需要管理员运行新的 `deploy/install.sh` 完成更新。没有真实模型 key 和 SMTP 凭据时，不能声称 live 模型成功或真实邮件已投递。完整实测结果由 delivery/TEST_RESULTS.md 记录。
+系统级安装需要管理员执行 `deploy/install.sh`，它会备份数据库、迁移、重启本项目服务并切换带版本的前端目录。无免密码 sudo 或 Docker socket 权限的开发账号仍可执行测试和只读部署检查，但不能替代系统级安装。完成安装后运行 `deploy/verify.sh` 和 `deploy/verify-guest.py`，分别确认站点与游客读写权限。没有真实模型 key 和 SMTP 凭据时，不能声称 live 模型成功或真实邮件已投递。
 
 本版本 repository 按请求装载集合；虽然 PostgreSQL 对象独立行、事务与并发写已验证，大数据量下的分页/查询下推优化尚未完成。30 秒小规模负载探针只用于发现明显错误，不能视作 4 核/8 GB 生产容量或长时间稳定性验收。
 

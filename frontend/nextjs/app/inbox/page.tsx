@@ -44,6 +44,7 @@ export default function InboxPage() {
           <h2>收件箱</h2>
           <button
             className="ps-btn tiny"
+            data-guest-mutation
             disabled={busy || !items.some((item) => !item.read_at)}
             onClick={markAllRead}
           >

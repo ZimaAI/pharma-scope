@@ -142,6 +142,50 @@ def test_postgres_api_restart_preserves_record_session_and_audit(postgres_env, t
     engine.dispose()
 
 
+def test_postgres_guest_selection_persists_and_cli_switch_revokes_session(postgres_env, tmp_path):
+    bootstrap(postgres_env)
+    with api_process(postgres_env, tmp_path) as origin:
+        with httpx.Client(base_url=origin, trust_env=False) as admin, httpx.Client(base_url=origin, trust_env=False) as guest:
+            workspace = login(admin, postgres_env)
+            created = admin.post(f"/api/v1/workspaces/{workspace}/members", json={
+                "email": "demo-member@pharmascope.invalid", "display_name": "Demo member",
+                "password": "integration-demo-member-123", "role": "analyst",
+            })
+            assert created.status_code == 201, created.text
+            member_id = created.json()["user"]["id"]
+            drug = admin.post(f"/api/v1/workspaces/{workspace}/drugs", json={"display_name": "Guest integration data"})
+            assert drug.status_code == 201, drug.text
+            selected = admin.patch(f"/api/v1/workspaces/{workspace}/settings/demo-account", json={"user_id": member_id})
+            assert selected.status_code == 200 and selected.json()["user_id"] == member_id
+
+            signed_in = guest.post("/api/v1/auth/guest-login")
+            assert signed_in.status_code == 200, signed_in.text
+            assert signed_in.json()["is_guest"] is True
+            assert signed_in.json()["memberships"] == [{
+                "workspace_id": workspace, "workspace_name": "PostgreSQL integration", "role": "reader",
+            }]
+            assert drug.json()["id"] in {
+                row["id"] for row in guest.get(f"/api/v1/workspaces/{workspace}/drugs").json()["items"]
+            }
+            denied = guest.post(f"/api/v1/workspaces/{workspace}/drugs", headers={
+                "X-CSRF-Token": signed_in.json()["csrf_token"]
+            }, json={"display_name": "Guest must not create"})
+            assert denied.status_code == 403
+            cookies = dict(guest.cookies)
+
+    # A separate CLI process updates the same database while the old guest
+    # session is persisted. The next API process must reject that session.
+    command(postgres_env, "-m", "backend.cli", "set-demo", "--workspace-id", workspace,
+            "--email", "integration@pharmascope.invalid")
+    with api_process(postgres_env, tmp_path) as origin, httpx.Client(
+        base_url=origin, cookies=cookies, trust_env=False
+    ) as old_guest:
+        assert old_guest.get("/api/v1/auth/me").status_code == 401
+        fresh = old_guest.post("/api/v1/auth/guest-login")
+        assert fresh.status_code == 200 and fresh.json()["is_guest"] is True
+        assert old_guest.get(f"/api/v1/workspaces/{workspace}/drugs").status_code == 200
+
+
 def test_postgres_two_api_processes_keep_concurrent_updates(postgres_env, tmp_path):
     bootstrap(postgres_env)
     with api_process(postgres_env, tmp_path) as first, api_process(postgres_env, tmp_path) as second:

@@ -80,6 +80,60 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/LoginRequest'
+  /api/v1/auth/guest-login:
+    post:
+      operationId: auth_guest_login
+      summary: Create a read-only guest session for the selected demo account
+      tags:
+      - auth
+      security: []
+      responses:
+        '200':
+          description: Guest session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+        '401':
+          $ref: '#/components/responses/StructuredError'
+        '429':
+          $ref: '#/components/responses/StructuredError'
+        '503':
+          $ref: '#/components/responses/StructuredError'
+  /api/v1/auth/password:
+    post:
+      operationId: auth_change_password
+      summary: Change the signed-in account password
+      tags:
+      - auth
+      parameters:
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+      responses:
+        '200':
+          description: Password changed and other sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '401':
+          $ref: '#/components/responses/StructuredError'
+        '403':
+          $ref: '#/components/responses/StructuredError'
+        '422':
+          $ref: '#/components/responses/StructuredError'
+        '429':
+          $ref: '#/components/responses/StructuredError'
   /api/v1/auth/logout:
     post:
       operationId: auth_logout
@@ -493,6 +547,44 @@ paths:
                 $ref: '#/components/schemas/Error'
       security:
       - sessionCookie: []
+    post:
+      operationId: members_create
+      summary: Create an account in the workspace
+      tags:
+      - members
+      parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/Id'
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemberCreate'
+      responses:
+        '201':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+        '401':
+          $ref: '#/components/responses/StructuredError'
+        '403':
+          $ref: '#/components/responses/StructuredError'
+        '409':
+          $ref: '#/components/responses/StructuredError'
+        '422':
+          $ref: '#/components/responses/StructuredError'
   /api/v1/workspaces/{workspace_id}/members/{user_id}:
     patch:
       operationId: members_update_role
@@ -579,6 +671,113 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/MemberUpdate'
+  /api/v1/workspaces/{workspace_id}/members/{user_id}/password:
+    post:
+      operationId: members_reset_password
+      summary: Reset a workspace member's password and revoke their sessions
+      tags:
+      - members
+      parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/Id'
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/Id'
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+      responses:
+        '200':
+          description: Password reset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '401':
+          $ref: '#/components/responses/StructuredError'
+        '403':
+          $ref: '#/components/responses/StructuredError'
+        '404':
+          $ref: '#/components/responses/StructuredError'
+        '422':
+          $ref: '#/components/responses/StructuredError'
+  /api/v1/workspaces/{workspace_id}/settings/demo-account:
+    get:
+      operationId: settings_get_demo_account
+      summary: Get the guest demo account setting
+      tags:
+      - settings
+      parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/Id'
+      responses:
+        '200':
+          description: Current demo account setting
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DemoAccountSetting'
+        '401':
+          $ref: '#/components/responses/StructuredError'
+        '403':
+          $ref: '#/components/responses/StructuredError'
+        '404':
+          $ref: '#/components/responses/StructuredError'
+    patch:
+      operationId: settings_update_demo_account
+      summary: Select or clear the account shown to guest visitors
+      tags:
+      - settings
+      parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/Id'
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemoAccountUpdate'
+      responses:
+        '200':
+          description: Demo account setting updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DemoAccountSetting'
+        '401':
+          $ref: '#/components/responses/StructuredError'
+        '403':
+          $ref: '#/components/responses/StructuredError'
+        '404':
+          $ref: '#/components/responses/StructuredError'
+        '422':
+          $ref: '#/components/responses/StructuredError'
   /api/v1/workspaces/{workspace_id}/drugs:
     get:
       operationId: drugs_list
@@ -5523,7 +5722,14 @@ components:
     sessionCookie:
       type: apiKey
       in: cookie
-      name: pharma_session
+      name: pharmascope_session
+  responses:
+    StructuredError:
+      description: Structured error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
   schemas:
     Id:
       type: string
@@ -5657,11 +5863,14 @@ components:
           type: string
         is_active:
           type: boolean
+        is_guest:
+          type: boolean
       required:
       - id
       - email
       - display_name
       - is_active
+      - is_guest
       additionalProperties: false
     Membership:
       type: object
@@ -5693,12 +5902,17 @@ components:
           type: string
           enum:
           - replay
+          - demo
           - live
+          - gptr
+        is_guest:
+          type: boolean
       required:
       - user
       - memberships
       - csrf_token
       - runtime_mode
+      - is_guest
       additionalProperties: false
     LoginRequest:
       type: object
@@ -5709,10 +5923,82 @@ components:
         password:
           type: string
           minLength: 1
-          maxLength: 512
+          maxLength: 256
       required:
       - email
       - password
+      additionalProperties: false
+    PasswordChangeRequest:
+      type: object
+      properties:
+        current_password:
+          type: string
+          minLength: 1
+        new_password:
+          type: string
+          minLength: 12
+          maxLength: 256
+      required:
+      - current_password
+      - new_password
+      additionalProperties: false
+    PasswordResetRequest:
+      type: object
+      properties:
+        new_password:
+          type: string
+          minLength: 12
+          maxLength: 256
+      required:
+      - new_password
+      additionalProperties: false
+    MemberCreate:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        display_name:
+          type: string
+          minLength: 1
+        password:
+          type: string
+          minLength: 12
+          maxLength: 256
+        role:
+          $ref: '#/components/schemas/Role'
+      required:
+      - email
+      - display_name
+      - password
+      additionalProperties: false
+    DemoAccountUpdate:
+      type: object
+      properties:
+        user_id:
+          anyOf:
+          - $ref: '#/components/schemas/Id'
+          - type: 'null'
+      required:
+      - user_id
+      additionalProperties: false
+    DemoAccountSetting:
+      type: object
+      properties:
+        user_id:
+          anyOf:
+          - $ref: '#/components/schemas/Id'
+          - type: 'null'
+        user:
+          anyOf:
+          - $ref: '#/components/schemas/User'
+          - type: 'null'
+        enabled:
+          type: boolean
+      required:
+      - user_id
+      - user
+      - enabled
       additionalProperties: false
     Member:
       type: object

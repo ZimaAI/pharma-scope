@@ -63,13 +63,13 @@ export default function DrugsPage() {
       title="药物档案"
       description="工作区内已建立的研发对象、别名与资料新鲜度。"
       actions={
-        <button className="ps-btn primary" type="button" onClick={() => setShowCreate(!showCreate)}>
+        <button className="ps-btn primary" type="button" data-guest-mutation onClick={() => setShowCreate(!showCreate)}>
           ＋ 建立药物档案
         </button>
       }
     >
       {showCreate && (
-        <form className="ps-card ps-card-body" onSubmit={create}>
+        <form className="ps-card ps-card-body" data-guest-mutation onSubmit={create}>
           <h2>建立药物档案</h2>
           <div className="ps-form-grid">
             <label>
