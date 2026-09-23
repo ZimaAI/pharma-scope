@@ -1,0 +1,204 @@
+{
+  "checked_at": "2026-09-23T02:51:44.721965+00:00",
+  "status": "V1_RELEASE_BLOCKED_EXTERNAL",
+  "backend": {
+    "command": "PHARMA_TEST_DATABASE_URL=<isolated PostgreSQL test URL> make test",
+    "passed": 82,
+    "skipped": 0,
+    "exit_code": 0,
+    "postgres_integration_tests_included": 6
+  },
+  "replay_browser": {
+    "suite": "nextjs-production-browser",
+    "mode": "real replay API; no live-source/model claim",
+    "checks": [
+      "unauthenticated 401 is visible; no demo fallback",
+      "cookie login, CSRF restoration, server runtime mode",
+      "drug creation posts real CSRF-authenticated API and reloads",
+      "server rejects missing CSRF",
+      "source lists, publication projection, event revisions and evidence snapshot",
+      "queued replay task cancels and retries through API",
+      "SSE reconnects after an injected transport failure",
+      "replay research API, named SSE events, full report, author cannot approve",
+      "independent review and publish via real API",
+      "subscription timezone preview, create, pause, trigger",
+      "source sync job and coverage shown from replay API",
+      "real missing-resource 404",
+      "403/409/422/503 render server error and request ID without data fallback",
+      "admin source health-check job",
+      "workspace members load from role-protected API",
+      "workspace switching reloads isolated API scope",
+      "mobile navigation",
+      "no browser runtime errors; no localhost API URL in production chunks"
+    ],
+    "success": true
+  },
+  "live_browser": {
+    "suite": "nextjs-live-postgres-browser",
+    "mode": "live",
+    "fixtures_used": false,
+    "source": "real ClinicalTrials.gov API v2",
+    "model": "missing credentials; expected explicit failure",
+    "checks": [
+      "live CLI bootstrap starts with zero fixture business records",
+      "real CT.gov ingested with hash and PubMed missing-identity failure is partial",
+      "production browser authenticates against live PostgreSQL API and displays LIVE",
+      "live trial projection, real NCT identity, observation, raw snapshot and hash render",
+      "persisted partial source job distinguishes missing NCBI_EMAIL from no results",
+      "browser approves real pending drug-record association through RBAC/CSRF API",
+      "live worker/model configuration failure is visible with no fabricated report or model result",
+      "live production browser has no JavaScript runtime errors"
+    ],
+    "success": true,
+    "source_job": {
+      "id": "cb196abf-0418-4a84-93d6-b11d76fe75e2",
+      "workspace_id": "5ebabe3a-fc42-4be6-8d8c-043e30bd78be",
+      "created_at": "2026-09-23T02:44:50Z",
+      "kind": "ingest",
+      "state": "partial",
+      "attempt": 1,
+      "error_code": "configuration",
+      "progress": {
+        "processed": 1,
+        "total": null
+      },
+      "coverage": [
+        {
+          "source": "ctgov",
+          "status": "partial",
+          "records_count": 1,
+          "truncated": true,
+          "as_of": null,
+          "limitations": []
+        },
+        {
+          "source": "pubmed",
+          "status": "failed",
+          "records_count": 0,
+          "truncated": false,
+          "as_of": null,
+          "limitations": [
+            "configuration",
+            "NCBI_EMAIL is required in live mode; NCBI_API_KEY is optional"
+          ]
+        }
+      ]
+    },
+    "trial_ids": [
+      "NCT03625323"
+    ],
+    "snapshot": {
+      "content_hash": "2107cefda997cbb66403043f4f59b6b6f5a99ffc4469650d63cfe5e9309ed4a3",
+      "source_updated": {
+        "value": "2026-04-22",
+        "precision": "day",
+        "kind": "source_reported"
+      },
+      "first_observed_at": "2026-09-23T02:44:53.403633Z"
+    },
+    "research_failure": {
+      "status": "failed",
+      "error_code": "MODEL_CONFIGURATION_ERROR",
+      "error_message": "OPENAI_API_KEY is required for live GPT Researcher runs; configure the worker environment",
+      "runtime_mode": "live",
+      "report_id": null,
+      "usage": {
+        "tool_calls": 0,
+        "model_calls": 0,
+        "input_tokens": null,
+        "output_tokens": null,
+        "usage_quality": "unknown",
+        "estimated_cost": null,
+        "currency": null
+      }
+    },
+    "cleanup": "test API/worker stopped; disposable PostgreSQL schema dropped"
+  },
+  "external_probe": {
+    "checked_at": "2026-09-23T02:29:19.316828+00:00",
+    "mode": "live",
+    "gptr": {
+      "configured": false,
+      "mode": "live",
+      "error_code": "model_credentials_missing",
+      "message": "OPENAI_API_KEY is required for live GPT Researcher runs; configure the worker environment",
+      "imported": true,
+      "upstream_version": "0.14.7",
+      "upstream_commit": "8da8d8f85d7124649bb059ce1b2106ed3d3f5ea5",
+      "lite_profile": true
+    },
+    "sources": {
+      "ctgov": {
+        "status": "PASS",
+        "records": 1,
+        "next_cursor": true,
+        "elapsed_seconds": 1.411,
+        "samples": [
+          {
+            "external_id": "NCT03625323",
+            "content_hash": "2107cefda997cbb66403043f4f59b6b6f5a99ffc4469650d63cfe5e9309ed4a3",
+            "fetched_at": "2026-09-23T02:29:21.844988Z",
+            "source_updated": {
+              "value": "2026-04-22",
+              "precision": "day",
+              "kind": "source_reported"
+            }
+          }
+        ]
+      },
+      "pubmed": {
+        "status": "BLOCKED",
+        "error_code": "configuration",
+        "message": "NCBI_EMAIL is required in live mode; NCBI_API_KEY is optional",
+        "elapsed_seconds": 0.0
+      }
+    },
+    "model_execution": {
+      "status": "BLOCKED",
+      "error_code": "model_credentials_missing",
+      "message": "OPENAI_API_KEY is required for live GPT Researcher runs; configure the worker environment"
+    },
+    "max_rss_kib": 117116
+  },
+  "load_smoke": {
+    "kind": "small_isolated_smoke_not_capacity_acceptance",
+    "database": "PostgreSQL 16, isolated schema",
+    "duration_seconds": 30.26,
+    "concurrency": 6,
+    "requests": 773,
+    "errors": 0,
+    "error_types": [],
+    "writes": 196,
+    "visible_records": 196,
+    "requests_per_second": 25.55,
+    "latency_p50_ms": 226.97,
+    "latency_p95_ms": 336.46,
+    "latency_max_ms": 376.67,
+    "api_peak_rss_mib": 80.91
+  },
+  "public_deployment": {
+    "origin": "https://pharmascope.zimagent.top",
+    "runtime": "existing replay deployment",
+    "https_root": 200,
+    "http_redirect": 301,
+    "health": 200,
+    "ready": 404,
+    "verify_script_exit_code": 22,
+    "latest_system_install": "BLOCKED: no sudo/root or Docker socket permission"
+  },
+  "not_run": [
+    "credentialed external model success",
+    "credentialed PubMed success",
+    "real SMTP delivery",
+    "Docker image build/run",
+    "latest public systemd/nginx deployment",
+    "long-duration/capacity acceptance"
+  ],
+  "cleanup": {
+    "temporary_test_postgresql_18432": "stopped; data directory retained for repeatable tests",
+    "temporary_api_worker_nginx": "stopped",
+    "temporary_postgresql_schemas": 0,
+    "existing_services": "nginx/pharmascope-api/biz-sentinel-backend/biz-sentinel-frontend/postgresql@16-main remain active",
+    "existing_nginx_sites": 7
+  }
+}

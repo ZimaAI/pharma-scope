@@ -1,10 +1,8 @@
-"""PharmaScope Lite domain API.
+"""PharmaScope Lite authenticated API.
 
-This module is the self contained FastAPI application used by the Lite demo.  It
-keeps the domain state in a small repository abstraction so that the same API can
-run with replay fixtures during development and can later be backed by SQLAlchemy
-without changing the HTTP contract.  The original GPT Researcher demo routes are
-left in ``server.app``; this app exposes the versioned PharmaScope contract.
+Live requests use a transactional PostgreSQL row repository; the independent
+worker owns external source/model calls. Explicit replay supports fictional
+fixtures for demonstrations without implicit live fallback.
 """
 from __future__ import annotations
 
@@ -16,6 +14,7 @@ import os
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Iterable, Optional
 
@@ -24,6 +23,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, PlainTextResponse
 from pydantic import BaseModel, Field
+
+from .repository import RepositoryUnavailable, RepositoryConflict, repository_from_env, restore_state, state_payload
+from .auth import verify_password
+from sqlalchemy.exc import SQLAlchemyError
+from .sources import ClinicalTrialsGovAdapter, PubMedAdapter, SourceError, SourceQuery, SourcePage
+from .source_ingest import SnapshotIngestor
+from .research import ResearchBudget, ResearchConfigurationError, ResearchContext, execute_live_research
+from .gptr_adapter import GPTResearcherError, PharmaResearchConductor as GPTRConductor, ResearchBudget as GPTRBudget
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,7 +77,7 @@ class LoginRequest(BaseModel):
 
 
 class DomainState:
-    """Thread-safe in-process repository used by replay/demo and unit tests."""
+    """Request/worker unit of work; persisted through the row repository."""
 
     def __init__(self) -> None:
         self.lock = asyncio.Lock()
@@ -104,7 +111,11 @@ class DomainState:
             "ctgov": {"source": "ctgov", "enabled": True, "configured": True, "state": "healthy", "last_success_at": None, "last_error_code": None, "coverage": {"records": 0}},
             "pubmed": {"source": "pubmed", "enabled": True, "configured": True, "state": "healthy", "last_success_at": None, "last_error_code": None, "coverage": {"records": 0}},
         }
-        self.seed()
+        # Fixtures are business data only in explicit replay/demo mode.  Live
+        # starts empty and is populated by migrations/seed-admin plus source
+        # sync; it can never silently fall back to demo records.
+        if os.getenv("PHARMA_RUNTIME_MODE", "live") in ("replay", "demo"):
+            self.seed()
 
     def seed(self) -> None:
         ident = read_fixture("00-identities.json", {})
@@ -115,13 +126,6 @@ class DomainState:
         for u in ident.get("users", []):
             self.users[u["id"]] = {**u, "is_active": True, "created_at": now()}
             self.memberships[(DEFAULT_WORKSPACE, u["id"])] = {"workspace_id": DEFAULT_WORKSPACE, "user_id": u["id"], "role": u.get("role", "analyst"), "enabled": True, "created_at": now()}
-        # The static Next.js demo uses a friendly workspace alias.  It resolves
-        # to the same seeded workspace while all canonical API responses retain
-        # the UUID from the fixture contract.
-        self.workspaces["demo-workspace"] = {**self.workspaces[DEFAULT_WORKSPACE], "id": "demo-workspace"}
-        for u in ident.get("users", []):
-            original = self.memberships[(DEFAULT_WORKSPACE, u["id"])]
-            self.memberships[("demo-workspace", u["id"])] = {**original, "workspace_id": "demo-workspace"}
         # Isolated workspace is deliberately populated only for the admin to make
         # cross-workspace authorization tests deterministic.
         self.memberships[(SECOND_WORKSPACE, ADMIN_USER)] = {"workspace_id": SECOND_WORKSPACE, "user_id": ADMIN_USER, "role": "admin", "enabled": True, "created_at": now()}
@@ -179,6 +183,20 @@ class DomainState:
 
 
 state = DomainState()
+# Replay is intentionally in-memory.  Live/GPT mode selects a transactional
+# PostgreSQL checkpoint repository when PHARMA_DATABASE_URL is configured; an
+# unavailable repository is surfaced by /readyz instead of silently falling
+# back to fixtures.
+state_store = None
+persistence_error: str | None = None
+try:
+    state_store = repository_from_env()
+    if state_store:
+        checkpoint = state_store.load()
+        if checkpoint:
+            restore_state(state, checkpoint)
+except (RepositoryUnavailable, SQLAlchemyError) as exc:
+    persistence_error = "Database unavailable or migrations required; check PHARMA_DATABASE_URL and run alembic upgrade head"
 
 
 def error(code: str, message: str, status: int = 400, details: dict | None = None) -> JSONResponse:
@@ -191,7 +209,7 @@ async def user_context(request: Request) -> dict:
         # API clients in replay mode may send an explicit user header. This is
         # disabled when PHARMA_ALLOW_DEV_HEADER=0 and never trusted for role.
         header_user = request.headers.get("X-User-Id") if os.getenv("PHARMA_ALLOW_DEV_HEADER", "1") == "1" else None
-        if header_user and header_user in state.users:
+        if os.getenv("PHARMA_RUNTIME_MODE", "live") in ("replay", "demo") and header_user and header_user in state.users:
             return state.users[header_user]
         raise HTTPException(401, detail={"code": "AUTH_REQUIRED", "message": "Authentication required"})
     session = state.sessions.get(token)
@@ -256,11 +274,57 @@ async def workspace_alias_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    request_id = request.headers.get("X-Request-Id") or uid()
+    global persistence_error
+    request_id = uid()
     request.state.request_id = request_id
-    response = await call_next(request)
+    # A short database transaction covers authorization, mutation, audit and
+    # idempotency together. External work runs only in the independent worker.
+    async with state.lock:
+        before = copy.deepcopy(state_payload(state))
+        try:
+            if state_store is None:
+                if persistence_error and request.url.path not in ("/healthz", "/readyz"):
+                    return error("DATABASE_UNAVAILABLE", persistence_error, 503)
+                response = await call_next(request)
+                if response.status_code < 400: record_audit(request, response.status_code)
+                else: restore_state(state, before)
+            else:
+                with state_store.transaction():
+                    current = state_store.load()
+                    if current: restore_state(state, current)
+                    persistence_error = None
+                    before = copy.deepcopy(state_payload(state))
+                    response = await call_next(request)
+                    if response.status_code < 400:
+                        record_audit(request, response.status_code)
+                        state_store.save(state_payload(state))
+                        persistence_error = None
+                    else: restore_state(state, before)
+        except RepositoryConflict:
+            restore_state(state, before)
+            return error("CONCURRENT_UPDATE", "Refresh and retry this operation", 409)
+        except SQLAlchemyError:
+            restore_state(state, before)
+            persistence_error = "Database transaction failed; no success was committed"
+            return error("DATABASE_UNAVAILABLE", persistence_error, 503)
+        except (ValueError, TypeError, KeyError):
+            restore_state(state, before)
+            return error("VALIDATION_ERROR", "Invalid request fields or JSON body", 422)
     response.headers["X-Request-Id"] = request_id
     return response
+
+
+def record_audit(request: Request, status_code: int) -> None:
+    if request.method not in ("POST", "PATCH", "DELETE", "PUT"): return
+    parts = request.url.path.split("/")
+    if "workspaces" not in parts: return
+    ws = parts[parts.index("workspaces") + 1]
+    session = state.sessions.get(request.cookies.get("pharmascope_session"), {})
+    actor = session.get("user_id") or request.headers.get("X-User-Id")
+    state.audit.append({"id": uid(), "workspace_id": ws, "actor_user_id": actor,
+        "action": request.method.lower() + ":" + "/".join(parts[5:]),
+        "resource_type": parts[5] if len(parts)>5 else "workspace",
+        "request_id": request.state.request_id, "created_at": now(), "result": status_code})
 
 
 @app.exception_handler(HTTPException)
@@ -282,7 +346,7 @@ async def api_http_error(request: Request, exc: HTTPException) -> JSONResponse:
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
-    response = error("VALIDATION_ERROR", "Request validation failed", 422, {"fields": exc.errors()})
+    response = error("VALIDATION_ERROR", "Request validation failed", 422, {"fields": [{"loc":e["loc"],"type":e["type"],"msg":e["msg"]} for e in exc.errors()]})
     payload = json.loads(response.body)
     payload["error"]["request_id"] = getattr(request.state, "request_id", uid())
     response.body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -292,24 +356,33 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"message": "ok", "status": "ok", "mode": os.getenv("PHARMA_MODE", "demo")}
+    runtime = os.getenv("PHARMA_RUNTIME_MODE", "live").lower()
+    return {"message": "ok", "status": "ok", "mode": "demo" if runtime in ("replay", "demo") else "live", "runtime_mode": runtime}
 
 
 @app.get("/readyz")
 async def readyz() -> dict:
-    return {"message": "ready", "status": "ready", "database": "replay"}
+    mode = os.getenv("PHARMA_RUNTIME_MODE", os.getenv("PHARMA_MODE", "live"))
+    if persistence_error:
+        return JSONResponse(status_code=503, content={"message": "database unavailable", "status": "not_ready", "database": "error", "error": persistence_error})
+    if mode in {"live", "gptr"} and state_store is None:
+        return JSONResponse(status_code=503, content={"message": "database is not configured", "status": "not_ready", "database": "missing"})
+    return {"message": "ready", "status": "ready", "database": "postgresql" if state_store else "replay"}
 
 
 @app.post("/api/v1/auth/login")
 async def login(body: LoginRequest, response: Response) -> dict:
     user = next((u for u in state.users.values() if u["email"].lower() == body.email.lower()), None)
     allowed = os.getenv("PHARMA_DEMO_PASSWORD", "demo")
-    if not user or body.password != allowed:
+    valid = verify_password(body.password, user.get("password_hash", "")) if user else False
+    if os.getenv("PHARMA_RUNTIME_MODE", "live") in ("replay", "demo") and user and not user.get("password_hash"):
+        valid = secrets.compare_digest(body.password, allowed)
+    if not user or not user.get("is_active", True) or not valid:
         raise HTTPException(401, detail={"code": "AUTH_REQUIRED", "message": "Invalid credentials"})
     token, csrf_token = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
     state.sessions[token] = {"user_id": user["id"], "csrf": csrf_token, "expires_at": (datetime.now(timezone.utc) + timedelta(hours=12)).timestamp()}
-    response.set_cookie("pharmascope_session", token, httponly=True, samesite="lax", secure=os.getenv("PHARMA_COOKIE_SECURE", "0") == "1", max_age=43200)
-    return {"user": user_contract(user), "memberships": [membership_contract(m) for m in state.memberships.values() if m["user_id"] == user["id"]], "csrf_token": csrf_token}
+    response.set_cookie("pharmascope_session", token, httponly=True, samesite="lax", secure=os.getenv("PHARMA_COOKIE_SECURE", "1" if os.getenv("PHARMA_RUNTIME_MODE")=="live" else "0") == "1", max_age=43200)
+    return {"runtime_mode": os.getenv("PHARMA_RUNTIME_MODE", "live"), "user": user_contract(user), "memberships": [membership_contract(m) for m in state.memberships.values() if m["user_id"] == user["id"] and m["workspace_id"] != "demo-workspace" and m.get("enabled",True)], "csrf_token": csrf_token}
 
 
 @app.post("/api/v1/auth/logout")
@@ -327,7 +400,7 @@ async def logout(request: Request, response: Response, csrf_token: str | None = 
 async def me(request: Request, user: dict = Depends(user_context)) -> dict:
     token = request.cookies.get("pharmascope_session")
     csrf_token = state.sessions.get(token, {}).get("csrf") if token else None
-    return {"user": user_contract(user), "memberships": [membership_contract(m) for m in state.memberships.values() if m["user_id"] == user["id"]], "csrf_token": csrf_token}
+    return {"runtime_mode": os.getenv("PHARMA_RUNTIME_MODE", "live"), "user": user_contract(user), "memberships": [membership_contract(m) for m in state.memberships.values() if m["user_id"] == user["id"] and m["workspace_id"] != "demo-workspace" and m.get("enabled",True)], "csrf_token": csrf_token}
 
 
 def records_for(ws: str, kind: str | None = None) -> list[dict]:
@@ -343,10 +416,22 @@ def with_projection(record: dict) -> dict:
     return p
 
 
-def source_health_payload() -> list[dict]:
-    """Expose only the stable SourceHealth contract fields."""
-    fields = ("source", "enabled", "configured", "state", "last_success_at", "last_error_code")
-    return [{key: value.get(key) for key in fields} for value in state.sources.values()]
+def sources_for(workspace_id):
+    values={}
+    replay=os.getenv("PHARMA_RUNTIME_MODE","live") in ("replay","demo")
+    for source in ("ctgov","pubmed"):
+        key=workspace_id+":"+source
+        if key not in state.sources:
+            state.sources[key]={"workspace_id":workspace_id,"source":source,"enabled":True,
+                "configured":replay or source=="ctgov" or bool(os.getenv("NCBI_EMAIL")),
+                "state":"healthy" if replay else "unknown","last_success_at":None,"last_error_code":None,"coverage":{"records":0}}
+        values[source]=state.sources[key]
+    return values
+
+
+def source_health_payload(workspace_id) -> list[dict]:
+    fields=("source","enabled","configured","state","last_success_at","last_error_code")
+    return [{k:v.get(k) for k in fields} for v in sources_for(workspace_id).values()]
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/dashboard")
@@ -354,7 +439,7 @@ async def dashboard(workspace_id: str, ctx: dict = Depends(workspace_user)) -> d
     events = [e for e in state.events.values() if e.get("workspace_id") == workspace_id]
     pending = [r for r in state.reports.values() if r.get("workspace_id") == workspace_id and r.get("state") in ("in_review", "draft")]
     watched = {d for s in state.subscriptions.values() if s.get("workspace_id") == workspace_id and s.get("enabled") for d in s.get("drug_ids", [])}
-    return {"watched_drugs": len(watched), "events_last_7_days": len(events), "pending_reviews": len(pending), "source_health": source_health_payload(), "as_of": now(), "is_demo": os.getenv("PHARMA_RUNTIME_MODE", "replay") == "replay"}
+    return {"watched_drugs": len(watched), "events_last_7_days": len(events), "pending_reviews": len(pending), "source_health": source_health_payload(workspace_id), "as_of": now(), "is_demo": os.getenv("PHARMA_RUNTIME_MODE", "live") == "replay"}
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/members")
@@ -375,7 +460,7 @@ async def member_update(workspace_id: str, user_id: str, request: Request, ctx: 
         m["role"] = payload["role"]
     if "enabled" in payload:
         m["enabled"] = bool(payload["enabled"])
-    return {**m, "user": state.users.get(user_id)}
+    return {**m, "user": user_contract(state.users.get(user_id, {}))}
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/drugs")
@@ -441,7 +526,7 @@ async def drug_archive(workspace_id: str, drug_id: str, ctx: dict = Depends(csrf
 @app.get("/api/v1/workspaces/{workspace_id}/drugs/{drug_id}/aliases")
 async def drug_aliases(workspace_id: str, drug_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
     get_drug(workspace_id, drug_id)
-    return page([a for a in state.aliases.values() if a["workspace_id"] == workspace_id and a["drug_id"] == drug_id], limit, cursor)
+    return page([alias_contract(a) for a in state.aliases.values() if a["workspace_id"] == workspace_id and a["drug_id"] == drug_id], limit, cursor)
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/drugs/{drug_id}/aliases")
@@ -449,16 +534,18 @@ async def alias_create(workspace_id: str, drug_id: str, request: Request, ctx: d
     require_role(ctx, "analyst", "reviewer", "admin")
     get_drug(workspace_id, drug_id)
     p = await request.json()
+    if p.get("evidence_id") and state.evidence.get(p["evidence_id"],{}).get("workspace_id")!=workspace_id:
+        raise HTTPException(404,detail={"code":"NOT_FOUND","message":"Evidence not found"})
     if not p.get("alias") or not p.get("namespace") or not p.get("note"):
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "alias, namespace and note are required"})
     a = {"id": uid(), "workspace_id": workspace_id, "drug_id": drug_id, "alias": p["alias"], "normalized_alias": str(p["alias"]).strip().lower(), "namespace": p["namespace"], "status": "pending", "evidence_id": p.get("evidence_id"), "note": p.get("note", ""), "proposed_by": ctx["user"]["id"], "reviewed_by": None, "reviewed_at": None, "created_at": now()}
     state.aliases[a["id"]] = a
-    return JSONResponse(status_code=201, content=a)
+    return JSONResponse(status_code=201, content=alias_contract(a))
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/aliases")
 async def alias_pending(workspace_id: str, status: str | None = None, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    items = [a for a in state.aliases.values() if a["workspace_id"] == workspace_id and (status is None or a["status"] == status)]
+    items = [alias_contract(a) for a in state.aliases.values() if a["workspace_id"] == workspace_id and (status is None or a["status"] == status)]
     return page(items, limit, cursor)
 
 
@@ -473,11 +560,19 @@ async def alias_decide(workspace_id: str, alias_id: str, request: Request, ctx: 
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "decision and note are required"})
     a["status"] = {"approve": "approved", "reject": "rejected", "revoke": "revoked"}[p["decision"]]
     a["reviewed_by"], a["reviewed_at"], a["note"] = ctx["user"]["id"], now(), p["note"]
-    return a
+    return alias_contract(a)
+
+
+def link_contract(value):
+    return {k:value.get(k) for k in ("id","workspace_id","created_at","record_id","drug_id","relation","evidence_id","note","status")}
+
+
+def alias_contract(value):
+    return {k:value.get(k) for k in ("id","workspace_id","created_at","drug_id","alias","namespace","evidence_id","note","status","proposed_by","reviewed_by")}
 
 
 def list_links(workspace_id: str, status: str | None = None) -> list[dict]:
-    return [x for x in state.links.values() if x["workspace_id"] == workspace_id and (status is None or x["status"] == status)]
+    return [link_contract(x) for x in state.links.values() if x["workspace_id"] == workspace_id and (status is None or x["status"] == status)]
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/entity-links")
@@ -489,13 +584,15 @@ async def links_list(workspace_id: str, status: str | None = None, limit: int = 
 async def link_create(workspace_id: str, request: Request, ctx: dict = Depends(csrf)) -> dict:
     require_role(ctx, "analyst", "reviewer", "admin")
     p = await request.json()
+    if p.get("evidence_id") and state.evidence.get(p["evidence_id"],{}).get("workspace_id")!=workspace_id:
+        raise HTTPException(404,detail={"code":"NOT_FOUND","message":"Evidence not found"})
     if not p.get("record_id") or not p.get("drug_id") or not p.get("relation") or not p.get("note"):
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "record_id, drug_id, relation and note are required"})
-    if p["record_id"] not in state.records or p["drug_id"] not in state.drugs:
+    if state.records.get(p["record_id"], {}).get("workspace_id") != workspace_id or state.drugs.get(p["drug_id"], {}).get("workspace_id") != workspace_id:
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Record or drug not found"})
     x = {"id": uid(), "workspace_id": workspace_id, "record_id": p["record_id"], "drug_id": p["drug_id"], "relation": p["relation"], "status": "pending", "evidence_id": p.get("evidence_id"), "note": p.get("note", ""), "proposed_by": ctx["user"]["id"], "reviewed_by": None, "reviewed_at": None, "created_at": now()}
     state.links[x["id"]] = x
-    return JSONResponse(status_code=201, content=x)
+    return JSONResponse(status_code=201, content=link_contract(x))
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/entity-links/{link_id}/decision")
@@ -509,24 +606,35 @@ async def link_decide(workspace_id: str, link_id: str, request: Request, ctx: di
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "decision and note are required"})
     x["status"] = {"approve": "approved", "reject": "rejected", "revoke": "revoked"}[p["decision"]]
     x["reviewed_by"], x["reviewed_at"], x["note"] = ctx["user"]["id"], now(), p["note"]
-    return x
+    return link_contract(x)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/sources")
 async def source_list(workspace_id: str, ctx: dict = Depends(workspace_user)) -> dict:
-    return {"items": source_health_payload()}
+    return {"items": source_health_payload(workspace_id)}
 
 
 @app.patch("/api/v1/workspaces/{workspace_id}/sources/{source}")
 async def source_update(workspace_id: str, source: str, request: Request, ctx: dict = Depends(csrf)) -> dict:
     require_role(ctx, "admin")
-    if source not in state.sources:
+    if source not in sources_for(workspace_id):
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Source not found"})
     p = await request.json()
     if not isinstance(p.get("enabled"), bool):
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "enabled is required"})
-    state.sources[source].update({"enabled": p["enabled"]})
-    return next(item for item in source_health_payload() if item["source"] == source)
+    sources_for(workspace_id)[source].update({"enabled": p["enabled"]})
+    return next(item for item in source_health_payload(workspace_id) if item["source"] == source)
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/sources/{source}/check")
+async def source_check(workspace_id: str, source: str, ctx: dict=Depends(csrf)) -> dict:
+    require_role(ctx,"admin")
+    if source not in ("ctgov","pubmed"): raise HTTPException(404,detail={"code":"NOT_FOUND","message":"Source not found"})
+    replay=os.getenv("PHARMA_RUNTIME_MODE","live") in ("replay","demo")
+    job={"id":uid(),"workspace_id":workspace_id,"created_at":now(),"kind":"ingest","state":"completed" if replay else "queued",
+        "created_by":ctx["user"]["id"],"payload":{"sources":[source],"health_check":True},"coverage":[{"source":source,"state":"complete","mode":"replay"}] if replay else [],"progress":{"processed":0,"total":None},"attempt":0}
+    state.jobs[job["id"]]=job
+    return JSONResponse(status_code=202,content=job_contract(job))
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/source-syncs")
@@ -537,19 +645,124 @@ async def source_sync(workspace_id: str, request: Request, ctx: dict = Depends(c
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "sources, drug_ids and mode are required"})
     if not isinstance(p.get("sources"), list) or not p["sources"]:
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "sources is required"})
+    validate_scope(workspace_id, p["drug_ids"], p["sources"])
     requested_sources = p["sources"]
     source = requested_sources[0]
-    if source not in state.sources:
+    if source not in sources_for(workspace_id):
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "Unsupported source"})
-    key = (workspace_id, idempotency_key or uid())
+    key = (workspace_id + ":sync:" + ctx["user"]["id"], idempotency_key or uid())
     if key in state.idempotency:
         if state.idempotency[key][0] != state.hash(p):
             raise HTTPException(409, detail={"code": "IDEMPOTENCY_CONFLICT", "message": "Idempotency key was already used with a different request"})
-        return state.idempotency[key][1]
-    j = {"id": uid(), "workspace_id": workspace_id, "created_at": now(), "kind": "ingest", "state": "queued", "progress": {"processed": 0, "total": None}, "coverage": [], "attempt": 0, "error_code": None}
+        return job_contract(state.idempotency[key][1])
+    j = {"id": uid(), "workspace_id": workspace_id, "created_at": now(), "kind": "ingest", "state": "queued", "created_by":ctx["user"]["id"], "payload": p, "progress": {"processed": 0, "total": None}, "coverage": [], "attempt": 0, "error_code": None}
     state.jobs[j["id"]] = j
     state.idempotency[key] = (state.hash(p), j)
-    return JSONResponse(status_code=202, content=j)
+    if os.getenv("PHARMA_RUNTIME_MODE", "live") in ("replay", "demo"):
+        coverage = []
+        for source_name in requested_sources:
+            key_name = "ctgov" if source_name in ("ctgov", "clinicaltrials_gov") else source_name
+            count = len(records_for(workspace_id, "trial" if key_name == "ctgov" else "publication")) if key_name in ("ctgov", "pubmed") else 0
+            coverage.append({"source": key_name, "state": "complete", "records": count, "mode": "replay"})
+        j.update({"state": "completed", "coverage": coverage, "progress": {"processed": sum(x["records"] for x in coverage), "total": sum(x["records"] for x in coverage)}, "finished_at": now()})
+    return JSONResponse(status_code=202, content=job_contract(j))
+
+
+async def _execute_source_sync(job_id: str, request_payload: dict[str, Any]) -> None:
+    """Run a real source sync and persist observations/snapshots.
+
+    Each source has its own outcome.  A failed source leaves an explicit failed
+    job and coverage entry; it is never represented as an empty successful page.
+    """
+    job = state.jobs.get(job_id)
+    if not job:
+        return
+    ws = job["workspace_id"]
+    job.update({"state": "running", "attempt": int(job.get("attempt", 0)) + 1, "started_at": now(), "updated_at": now()})
+    checkpoint()
+    if job.get("created_by") and not execution_authorized(ws,job["created_by"]):
+        job.update(state="failed",error_code="OWNER_PERMISSION_REVOKED",finished_at=now())
+        checkpoint();return
+    ingestor = SnapshotIngestor(state)
+    coverage: list[dict[str, Any]] = []
+    source_names = list(dict.fromkeys(request_payload.get("sources", [])))
+    drugs = [state.drugs.get(d) for d in request_payload.get("drug_ids", [])]
+    query_text = " OR ".join(str(d.get("display_name") or d.get("development_code")) for d in drugs if d)
+    query_text = query_text or str(request_payload.get("query") or "")
+    for source_name in source_names:
+        if source_name not in ("ctgov", "clinicaltrials_gov", "pubmed"):
+            coverage.append({"source": source_name, "state": "failed", "error_code": "unsupported_source"})
+            continue
+        adapter = None
+        try:
+            if not sources_for(ws).get(source_name,{}).get("enabled"):
+                raise SourceError("disabled","Source is disabled")
+            adapter = ClinicalTrialsGovAdapter() if source_name in ("ctgov", "clinicaltrials_gov") else PubMedAdapter()
+            if request_payload.get("health_check"):
+                result=await adapter.health()
+                sources_for(ws)[source_name].update(result)
+                coverage.append({"source":source_name,"state":"complete" if result["state"]=="healthy" else "failed","error_code":result.get("last_error_code"),"records":0})
+                continue
+            if request_payload.get("mode")=="refresh_linked":
+                linked_ids={x["record_id"] for x in state.links.values() if x.get("workspace_id")==ws and x.get("drug_id") in request_payload["drug_ids"] and x.get("status")=="approved"}
+                linked=[r for r in state.records.values() if r.get("workspace_id")==ws and r.get("id") in linked_ids and r.get("source")==source_name]
+                if not linked: raise SourceError("NO_APPROVED_LINKS","Confirm drug/source record links before refreshing or subscribing")
+                items=[]; failures=[]
+                for record in linked[:100]:
+                    try:
+                        envelope=await adapter.fetch(record["external_id"])
+                        ingestor.ingest(ws,envelope,operation_key=f"{job_id}:{envelope.source}:{envelope.external_id}")
+                        items.append(envelope)
+                    except SourceError as exc:
+                        ingestor.record_failure(ws,source=source_name,external_id=record["external_id"],operation_key=job_id+record["id"],error=exc)
+                        failures.append(exc.code)
+                    checkpoint()
+                page_result=SourcePage(source=source_name,items=items,next_cursor=None,coverage={"errors":failures,"truncated":len(linked)>100})
+            else:
+                page_result = await adapter.search(SourceQuery(query=query_text, limit=min(int(request_payload.get("limit", 100)), 100),cursor=request_payload.get("cursor")))
+            processed = 0
+            for envelope in page_result.items:
+                observation=ingestor.ingest(ws, envelope, operation_key=f"{job_id}:{envelope.source}:{envelope.external_id}")
+                for drug in drugs:
+                    if drug and drug.get("workspace_id")==ws and not any(x.get("workspace_id")==ws and x.get("record_id")==observation["record_id"] and x.get("drug_id")==drug["id"] for x in state.links.values()):
+                        link_id=uid()
+                        state.links[link_id]={"id":link_id,"workspace_id":ws,"record_id":observation["record_id"],"drug_id":drug["id"],"relation":"unspecified","evidence_id":None,"status":"pending","note":"Source search match requires human confirmation","created_at":now()}
+                processed += 1
+                job["progress"]={"processed":processed,"total":None}
+                checkpoint()
+            failures=page_result.coverage.get("errors",[])
+            truncated=bool(page_result.next_cursor) or bool(page_result.coverage.get("truncated"))
+            health=sources_for(ws)[source_name]
+            health.update(state="degraded" if failures and processed else "unavailable" if failures else "healthy",configured=True,last_error_code=failures[0] if failures else None,coverage={"records":processed})
+            if processed or not failures: health["last_success_at"]=now()
+            coverage.append({"source":source_name,"state":"failed" if failures and not processed else "partial" if failures or truncated else "complete", "records":processed,"truncated":truncated,"next_cursor":page_result.next_cursor,"error_code":failures[0] if failures else None,"limitations":failures})
+        except SourceError as exc:
+            source_key = "ctgov" if source_name in ("ctgov", "clinicaltrials_gov") else source_name
+            if source_key in sources_for(ws):
+                sources_for(ws)[source_key].update({"state": "unavailable", "configured": exc.code != "configuration", "last_error_code": exc.code})
+            coverage.append({"source": source_key, "state": "failed", "error_code": exc.code, "message": str(exc)})
+        except Exception as exc:
+            key_name = "ctgov" if source_name in ("ctgov", "clinicaltrials_gov") else source_name
+            if key_name in sources_for(ws):
+                sources_for(ws)[key_name].update({"state": "unavailable", "last_error_code": "adapter_error"})
+            coverage.append({"source": key_name, "state": "failed", "error_code": "adapter_error", "message": "Source adapter failed; check configuration and source status"})
+        finally:
+            if adapter is not None and hasattr(adapter, "aclose"):
+                await adapter.aclose()  # type: ignore[attr-defined]
+    failed = [x for x in coverage if x.get("state") == "failed"]
+    job.update({"state": "failed" if failed and len(failed) == len(coverage) else ("partial" if failed or any(x.get("state")=="partial" for x in coverage) else "completed"), "coverage": coverage, "progress": {"processed": sum(int(x.get("records", 0)) for x in coverage), "total": None}, "error_code": failed[0].get("error_code") if failed else None, "finished_at": now()})
+    checkpoint()
+
+
+def coverage_contract(value):
+    return {"source":value["source"],"status":value.get("status",value.get("state","partial")),
+        "records_count":value.get("records_count",value.get("records",0)),"truncated":bool(value.get("truncated",False)),
+        "as_of":value.get("as_of"),"limitations":value.get("limitations",[]) + ([value.get("error_code") or "Source failed",value.get("message") or "See source configuration"] if value.get("state")=="failed" else [])}
+
+
+def job_contract(job):
+    return {**{k:job.get(k) for k in ("id","workspace_id","created_at","kind","state","attempt","error_code","progress")},
+        "coverage":[coverage_contract(c) for c in job.get("coverage",[])]}
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/jobs/{job_id}")
@@ -557,7 +770,7 @@ async def job_get(workspace_id: str, job_id: str, ctx: dict = Depends(workspace_
     j = state.jobs.get(job_id)
     if not j or j["workspace_id"] != workspace_id:
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Job not found"})
-    return j
+    return job_contract(j)
 
 
 def project_filter(workspace_id: str, kind: str, drug_id: str | None, query: str | None, status: str | None, has_results: bool | None) -> list[dict]:
@@ -571,7 +784,7 @@ def project_filter(workspace_id: str, kind: str, drug_id: str | None, query: str
     if drug_id:
         linked = {x["record_id"] for x in state.links.values() if x["workspace_id"] == workspace_id and x["drug_id"] == drug_id and x["status"] in ("pending", "approved")}
         # Demo data links PX-101 to the trial implicitly; explicit links take precedence.
-        if not linked and kind == "trial" and drug_id == "dd1dcb81-e4b6-5343-b4a6-544bf716d867":
+        if os.getenv("PHARMA_RUNTIME_MODE","live") in ("replay","demo") and not linked and kind == "trial" and drug_id == "dd1dcb81-e4b6-5343-b4a6-544bf716d867":
             linked = {x["id"] for x in records_for(workspace_id, "trial")}
         rows = [x for x in rows if x["id"] in linked]
     return rows
@@ -579,7 +792,9 @@ def project_filter(workspace_id: str, kind: str, drug_id: str | None, query: str
 
 @app.get("/api/v1/workspaces/{workspace_id}/trials")
 async def trials(workspace_id: str, drug_id: str | None = None, query: str | None = None, status: str | None = None, has_results: bool | None = None, observed_since: str | None = None, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    return page(project_filter(workspace_id, "trial", drug_id, query, status, has_results), limit, cursor)
+    rows=project_filter(workspace_id,"trial",drug_id,query,status,has_results)
+    if observed_since: rows=[r for r in rows if parse_time(r["updated_at"])>=parse_time(observed_since)]
+    return page(rows,limit,cursor)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/trials/{trial_id}")
@@ -592,7 +807,9 @@ async def trial(workspace_id: str, trial_id: str, ctx: dict = Depends(workspace_
 
 @app.get("/api/v1/workspaces/{workspace_id}/publications")
 async def publications(workspace_id: str, drug_id: str | None = None, query: str | None = None, status: str | None = None, has_results: bool | None = None, observed_since: str | None = None, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    return page(project_filter(workspace_id, "publication", drug_id, query, status, has_results), limit, cursor)
+    rows=project_filter(workspace_id,"publication",drug_id,query,status,has_results)
+    if observed_since: rows=[r for r in rows if parse_time(r["updated_at"])>=parse_time(observed_since)]
+    return page(rows,limit,cursor)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/publications/{publication_id}")
@@ -614,7 +831,7 @@ async def snapshots(workspace_id: str, record_id: str, limit: int = 20, cursor: 
 async def observations(workspace_id: str, record_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
     if record_id not in state.records or state.records[record_id].get("workspace_id") != workspace_id:
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Record not found"})
-    return page(sorted([o for o in state.observations.values() if o.get("workspace_id") == workspace_id and o.get("record_id") == record_id], key=lambda x: x.get("observation_seq", 0)), limit, cursor)
+    return page(sorted([{k:v for k,v in o.items() if k!="operation_key"} for o in state.observations.values() if o.get("workspace_id") == workspace_id and o.get("record_id") == record_id], key=lambda x: x.get("observation_seq", 0)), limit, cursor)
 
 
 def json_pointer(obj: Any, path: str) -> Any:
@@ -663,9 +880,10 @@ async def event_list(workspace_id: str, drug_id: str | None = None, observed_sin
     rows = [e for e in state.events.values() if e.get("workspace_id") == workspace_id]
     if drug_id:
         linked = {x["record_id"] for x in state.links.values() if x["workspace_id"] == workspace_id and x["drug_id"] == drug_id and x["status"] in ("pending", "approved")}
-        if not linked and drug_id == "dd1dcb81-e4b6-5343-b4a6-544bf716d867":
+        if os.getenv("PHARMA_RUNTIME_MODE","live") in ("replay","demo") and not linked and drug_id == "dd1dcb81-e4b6-5343-b4a6-544bf716d867":
             linked = {r["id"] for r in records_for(workspace_id, "trial")}
         rows = [e for e in rows if e.get("record_id") in linked]
+    if observed_since: rows=[r for r in rows if parse_time(r["updated_at"])>=parse_time(observed_since)]
     return page(sorted(rows, key=lambda x: x.get("updated_at", ""), reverse=True), limit, cursor)
 
 
@@ -704,18 +922,28 @@ async def run_create(workspace_id: str, request: Request, ctx: dict = Depends(cs
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "drug_ids is required"})
     if not p.get("time_range") or not p.get("source_allowlist"):
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "time_range and source_allowlist are required"})
-    key = (workspace_id, idempotency_key or uid())
+    validate_scope(workspace_id, p["drug_ids"], p["source_allowlist"], p["time_range"])
+    ResearchBudget.from_mapping(p.get("budget"))
+    key = (workspace_id + ":run:" + ctx["user"]["id"], idempotency_key or uid())
     if key in state.idempotency:
         if state.idempotency[key][0] != state.hash(p):
             raise HTTPException(409, detail={"code": "IDEMPOTENCY_CONFLICT", "message": "Idempotency key was already used with a different request"})
         return state.idempotency[key][1]
-    runtime_mode = os.getenv("PHARMA_RUNTIME_MODE", "replay")
-    if runtime_mode not in ("replay", "gptr"):
+    runtime_mode = os.getenv("PHARMA_RUNTIME_MODE", "live").lower()
+    if runtime_mode == "gptr":
+        runtime_mode = "live"
+    if runtime_mode == "demo":
         runtime_mode = "replay"
-    rid = uid(); run = {"id": rid, "workspace_id": workspace_id, "created_at": now(), "created_by": ctx["user"]["id"], "status": "queued", "question": p["question"], "frozen_request": p, "runtime_mode": runtime_mode, "budget": p.get("budget", {}), "usage": {"tool_calls": 0, "model_calls": 0, "input_tokens": None, "output_tokens": None, "usage_quality": "unknown", "estimated_cost": None, "currency": None}, "coverage": [], "checkpoint_ref": None, "attempt": 1, "stop_reason": None, "report_id": None, "event_seq": 0, "next_event_seq": 0, "updated_at": now()}
+    if runtime_mode not in ("replay", "live"):
+        raise HTTPException(503, detail={"code": "RUNTIME_MODE_INVALID", "message": "PHARMA_RUNTIME_MODE must be replay or live"})
+    rid = uid(); run = {"id": rid, "workspace_id": workspace_id, "created_at": now(), "created_by": ctx["user"]["id"], "status": "queued", "question": p["question"], "frozen_request": p, "runtime_mode": runtime_mode, "budget": p.get("budget", {}), "usage": {"tool_calls": 0, "model_calls": 0, "input_tokens": None, "output_tokens": None, "usage_quality": "unknown", "estimated_cost": None, "currency": None}, "coverage": [], "checkpoint_ref": None, "attempt": 0 if runtime_mode=="live" else 1, "stop_reason": None, "report_id": None, "event_seq": 0, "next_event_seq": 0, "updated_at": now()}
     state.runs[rid] = run
-    emit(rid, "run.queued", {"runtime_mode": run["runtime_mode"]}); run["status"] = "running"; emit(rid, "run.started", {"runtime_mode": run["runtime_mode"]})
-    emit(rid, "plan.updated", {"summary": "读取已授权试验观察并检查文献覆盖。"})
+    emit(rid, "run.queued", {"runtime_mode": runtime_mode})
+    if runtime_mode == "live":
+        state.idempotency[key] = (state.hash(p), run)
+        return JSONResponse(status_code=202, content=run_contract(run))
+    run["status"] = "running"
+    emit(rid, "run.started", {"runtime_mode": runtime_mode})
     # Replay mode produces a deterministic structured draft from the checked-in
     # fixture.  Live GPT Researcher integration can replace this step while
     # preserving the same report/version contract.
@@ -733,6 +961,134 @@ async def run_create(workspace_id: str, request: Request, ctx: dict = Depends(cs
     return JSONResponse(status_code=202, content=run_contract(run))
 
 
+async def _execute_live_run(run_id: str, request_payload: dict[str, Any]) -> None:
+    run = state.runs.get(run_id)
+    if not run or run.get("status") == "cancelled": return
+    ws = run["workspace_id"]
+    run.update(status="running", attempt=int(run.get("attempt",0))+1)
+    emit(run_id, "run.started", {"runtime_mode":"live"})
+    checkpoint()
+    try:
+        if not execution_authorized(ws,run["created_by"]):
+            run.update(status="failed",error_code="OWNER_PERMISSION_REVOKED",stop_reason="OWNER_PERMISSION_REVOKED")
+            emit(run_id,"run.failed",{"error_code":"OWNER_PERMISSION_REVOKED","message":"Run owner no longer has research permission"})
+            return
+        allowed = {x["record_id"] for x in state.links.values() if x.get("workspace_id")==ws
+                   and x.get("drug_id") in request_payload["drug_ids"] and x.get("status")=="approved"}
+        evidence=[]
+        start, end = request_payload["time_range"]["start"],request_payload["time_range"]["end_exclusive"]
+        observed_snapshots={o.get("snapshot_id") for o in state.observations.values() if o.get("workspace_id")==ws
+            and o.get("outcome")!="failed" and o.get("fetched_at") and parse_time(start)<=parse_time(o["fetched_at"])<parse_time(end)}
+        for item in state.evidence.values():
+            snap=state.snapshots.get(item.get("snapshot_id"),{})
+            record=state.records.get(snap.get("record_id"),{})
+            observed=snap.get("first_observed_at") or snap.get("created_at")
+            if (item.get("workspace_id")==ws and record.get("id") in allowed
+                and record.get("source") in request_payload["source_allowlist"]
+                and snap.get("id") in observed_snapshots):
+                evidence.append({**item,"evidence_id":item["id"],"source":record["source"],
+                    "normalized":snap.get("normalized",{}),"text":item.get("quoted_text") or item.get("excerpt") or json.dumps(snap.get("normalized",{}),ensure_ascii=False)})
+        async def sink(typ, payload):
+            emit(run_id,typ,payload)
+            if typ.startswith("tool."):
+                calls=state.tool_calls.setdefault(run_id,[])
+                calls.append({"id":uid(),"workspace_id":ws,"run_id":run_id,"seq":len(calls)+1,"type":typ,"created_at":now(),**payload})
+            if payload.get("usage"): run["usage"]=payload["usage"]
+            if typ=="research.checkpoint": run["checkpoint"]=payload
+            checkpoint()
+        budget=ResearchBudget.from_mapping(request_payload.get("budget"), usage=run.get("usage"))
+        for field in ("model_calls","tool_calls","records"):
+            if hasattr(budget,field): setattr(budget,field,int(run.get("usage",{}).get(field,0) or 0))
+        context=ResearchContext(workspace_id=ws,run_id=run_id,question=run["question"],
+            source_allowlist=request_payload["source_allowlist"],drug_ids=request_payload["drug_ids"],
+            time_range=request_payload["time_range"],budget=budget,evidence=evidence,emit=sink,checkpoint=run.get("checkpoint"))
+        deadline=run.setdefault("deadline_at",(datetime.now(timezone.utc)+timedelta(seconds=budget.timeout_seconds)).isoformat())
+        checkpoint()
+        remaining=(parse_time(deadline)-datetime.now(timezone.utc)).total_seconds()
+        if remaining<=0: raise TimeoutError("Research deadline expired during restart")
+        result=await asyncio.wait_for(execute_live_research(context),timeout=remaining)
+        content=result.get("report")
+        if not isinstance(content,dict): raise ValueError("Researcher must return a structured report")
+        validate_report_content(ws,content)
+        # Deterministic identifiers prevent duplicate reports after recovery.
+        report_id=str(uuid.uuid5(uuid.NAMESPACE_URL,run_id+":report"))
+        version_id=str(uuid.uuid5(uuid.NAMESPACE_URL,run_id+":v1"))
+        if version_id not in state.versions:
+            state.reports[report_id]={"id":report_id,"workspace_id":ws,"created_at":now(),"run_id":run_id,
+                "title":content["title"],"created_by":run["created_by"],"state":"draft",
+                "current_version_id":version_id,"published_version_id":None,"updated_at":now(),"runtime_mode":"live"}
+            state.versions[version_id]={"id":version_id,"workspace_id":ws,"created_at":now(),"report_id":report_id,
+                "version_no":1,"content":content,"content_hash":state.hash(content),"created_by":run["created_by"],
+                "runtime_mode":"live","claim_ids":[uid() for _ in content.get("claims",[])]}
+        run.update(status="completed",stop_reason="answered",report_id=report_id,coverage=result.get("coverage",content.get("coverage",[])),usage=result.get("usage",{}))
+        emit(run_id,"report.ready",{"report_id":report_id,"runtime_mode":"live"})
+        emit(run_id,"run.completed",{"runtime_mode":"live"})
+    except asyncio.CancelledError:
+        if run.pop("interrupted",False):
+            run.update(status="queued",stop_reason="worker_interrupted")
+            emit(run_id,"run.interrupted",{"checkpoint":bool(run.get("checkpoint"))})
+        else:
+            run.update(status="cancelled",stop_reason="cancelled")
+            emit(run_id,"run.cancelled",{})
+    except Exception as exc:
+        code=getattr(exc,"code","RESEARCH_FAILED")
+        message=str(exc) if isinstance(exc,(ResearchConfigurationError,GPTResearcherError)) else "Research execution failed; inspect source coverage and model configuration"
+        run.update(status="failed",stop_reason=code,error_code=code,error_message=message,
+                   gaps=["Research did not finish; completed events and evidence remain available"])
+        emit(run_id,"run.failed",{"error_code":code,"message":message})
+    finally:
+        checkpoint()
+
+
+def execution_authorized(workspace_id,user_id):
+    if state_store:
+        from .repository import PersistentStateStore
+        observer=PersistentStateStore(state_store.url)
+        try: current=observer.load() or {}
+        finally: observer.engine.dispose()
+        user=current.get("users",{}).get(user_id,{})
+        member=current.get("memberships",{}).get(workspace_id+"|"+user_id,{})
+    else:
+        user=state.users.get(user_id,{})
+        member=state.memberships.get((workspace_id,user_id),{})
+    return bool(user.get("is_active") and member.get("enabled",True) and member.get("role") in ("analyst","reviewer","admin"))
+
+
+def checkpoint():
+    if state_store is not None: state_store.save(state_payload(state))
+
+
+def parse_time(value):
+    stamp=datetime.fromisoformat(value.replace("Z","+00:00"))
+    if stamp.tzinfo is None: raise ValueError("Timezone is required")
+    return stamp
+
+
+def validate_scope(workspace_id, drug_ids, sources, time_range=None):
+    if not isinstance(drug_ids,list) or not 1<=len(drug_ids)<=5 or not isinstance(sources,list) or not sources or set(sources)-{"ctgov","pubmed"}:
+        raise HTTPException(422,detail={"code":"VALIDATION_ERROR","message":"Select 1–5 drugs and supported sources"})
+    for drug in drug_ids: get_drug(workspace_id,drug)
+    if time_range:
+        try:
+            if parse_time(time_range["start"])>=parse_time(time_range["end_exclusive"]): raise ValueError()
+            ZoneInfo(time_range["timezone"])
+        except (ValueError,KeyError,ZoneInfoNotFoundError):
+            raise HTTPException(422,detail={"code":"VALIDATION_ERROR","message":"Invalid time range or IANA timezone"})
+
+
+def validate_report_content(workspace_id, content):
+    import jsonschema
+    schema=json.loads((FIXTURES.parent/"contracts/research-output.schema.json").read_text())
+    try: jsonschema.validate(content,schema,format_checker=jsonschema.FormatChecker())
+    except jsonschema.ValidationError:
+        raise HTTPException(422,detail={"code":"INVALID_REPORT","message":"Report does not match ResearchOutput schema"})
+    for claim in content.get("claims",[]):
+        if claim["category"]=="fact" and not claim.get("evidence_links"):
+            raise HTTPException(422,detail={"code":"EVIDENCE_REQUIRED","message":"Facts require versioned evidence"})
+        for link in claim.get("evidence_links",[]):
+            if state.evidence.get(link["evidence_id"],{}).get("workspace_id")!=workspace_id:
+                raise HTTPException(422,detail={"code":"INVALID_EVIDENCE","message":"Evidence is not available in this workspace"})
+
 def get_run(workspace_id: str, run_id: str) -> dict:
     r = state.runs.get(run_id)
     if not r or r.get("workspace_id") != workspace_id:
@@ -740,18 +1096,26 @@ def get_run(workspace_id: str, run_id: str) -> dict:
     return r
 
 
+def usage_contract(usage):
+    base={"tool_calls":0,"model_calls":0,"input_tokens":None,"output_tokens":None,"usage_quality":"unknown","estimated_cost":None,"currency":None}
+    base.update(usage or {})
+    return base
+
+
 def run_contract(run: dict) -> dict:
-    fields = ("id", "workspace_id", "created_at", "created_by", "question", "status", "runtime_mode", "attempt", "frozen_request", "usage", "coverage", "stop_reason", "event_seq", "report_id", "updated_at")
-    return {key: run.get(key) for key in fields}
+    fields = ("id", "workspace_id", "created_at", "created_by", "question", "status", "runtime_mode", "attempt", "frozen_request", "usage", "coverage", "stop_reason", "error_code", "error_message", "event_seq", "report_id", "updated_at")
+    return {**{key: run.get(key) for key in fields},"usage":usage_contract(run.get("usage"))}
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/research/runs")
 async def runs_list(workspace_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
+    require_role(ctx,"analyst","reviewer","admin")
     return page([run_contract(r) for r in sorted([r for r in state.runs.values() if r.get("workspace_id") == workspace_id], key=lambda x: x.get("created_at", ""), reverse=True)], limit, cursor)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/research/runs/{run_id}")
 async def run_get(workspace_id: str, run_id: str, ctx: dict = Depends(workspace_user)) -> dict:
+    require_role(ctx,"analyst","reviewer","admin")
     return run_contract(get_run(workspace_id, run_id))
 
 
@@ -767,8 +1131,13 @@ async def run_cancel(workspace_id: str, run_id: str, ctx: dict = Depends(csrf)) 
 @app.post("/api/v1/workspaces/{workspace_id}/research/runs/{run_id}/retry")
 async def run_retry(workspace_id: str, run_id: str, request: Request, ctx: dict = Depends(csrf), idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")) -> dict:
     require_role(ctx, "analyst", "reviewer", "admin")
-    source = get_run(workspace_id, run_id); p = await request.json() if request.headers.get("content-length", "0") != "0" else {}
-    return await run_create(workspace_id, _request_with_json({**source.get("frozen_request", {}), **p}), ctx, idempotency_key)
+    source = get_run(workspace_id, run_id)
+    if source["status"] not in ("failed","cancelled"): raise HTTPException(409,detail={"code":"INVALID_STATE","message":"Only failed or cancelled runs can be retried"})
+    p = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+    result = await run_create(workspace_id, _request_with_json({**source.get("frozen_request", {}), **p}), ctx, idempotency_key)
+    data=json.loads(result.body) if hasattr(result,"body") else result
+    state.runs[data["id"]]["retry_of"]=run_id
+    return result
 
 
 class _Req:
@@ -789,19 +1158,46 @@ async def run_clarify(workspace_id: str, run_id: str, request: Request, ctx: dic
 
 @app.get("/api/v1/workspaces/{workspace_id}/research/runs/{run_id}/tool-calls")
 async def run_tools(workspace_id: str, run_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    get_run(workspace_id, run_id); return page(state.tool_calls.get(run_id, []), limit, cursor)
+    require_role(ctx,"analyst","reviewer","admin")
+    get_run(workspace_id, run_id)
+    rows=[]
+    for call in state.tool_calls.get(run_id,[]):
+        rows.append({"id":call["id"],"workspace_id":workspace_id,"created_at":call.get("created_at",now()),"run_id":run_id,
+            "tool":call.get("tool",call.get("tool_name","unknown")),"call_key":str(call.get("call_id",call.get("seq"))),
+            "state":"completed" if call.get("type")=="tool.completed" else "failed" if call.get("type")=="tool.failed" else "started",
+            "arguments_summary":call.get("arguments_summary",call.get("arguments",{})),"evidence_ids":call.get("evidence_ids",[]),
+            "error_code":call.get("error_code"),"duration_ms":call.get("duration_ms")})
+    return page(rows,limit,cursor)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/research/runs/{run_id}/events")
 async def run_stream(workspace_id: str, run_id: str, request: Request, last_event_id: str | None = Header(default=None, alias="Last-Event-ID"), ctx: dict = Depends(workspace_user)) -> StreamingResponse:
+    require_role(ctx,"analyst","reviewer","admin")
     get_run(workspace_id, run_id)
-    start = int(last_event_id or 0)
-    events = state.run_events.get(run_id, [])[start:]
+    try: start = int(last_event_id or request.query_params.get("after", "0"))
+    except ValueError: raise HTTPException(422, detail={"code":"VALIDATION_ERROR","message":"Invalid Last-Event-ID"})
     async def stream() -> AsyncIterator[str]:
-        for e in events:
-            yield f"id: {e['seq']}\nevent: {e['type']}\ndata: {json.dumps(e, ensure_ascii=False)}\n\n"
-        yield ": heartbeat\n\n"
-    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        position=start
+        await asyncio.sleep(0.01)
+        while True:
+            if state_store:
+                # Use a separate repository instance so streaming never changes
+                # the request/worker unit-of-work baseline.
+                from .repository import PersistentStateStore
+                store=PersistentStateStore(state_store.url)
+                try: snapshot=store.load() or {}; rows=snapshot.get("run_events",{}).get(run_id,[]); status=snapshot.get("runs",{}).get(run_id,{}).get("status")
+                finally: store.engine.dispose()
+            else:
+                rows=list(state.run_events.get(run_id,[])); status=state.runs[run_id]["status"]
+            for event in rows:
+                if event["seq"]>position:
+                    position=event["seq"]
+                    yield f"id: {position}\nevent: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+            if status in ("completed","failed","cancelled"): break
+            if await request.is_disconnected(): break
+            yield ": heartbeat\n\n"
+            await asyncio.sleep(1)
+    return StreamingResponse(stream(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 
 def report_for(workspace_id: str, report_id: str) -> dict:
@@ -809,6 +1205,10 @@ def report_for(workspace_id: str, report_id: str) -> dict:
     if not r or r.get("workspace_id") != workspace_id:
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Report not found"})
     return r
+
+
+def report_draft_visible(report,ctx):
+    return ctx["membership"]["role"] in ("reviewer","admin") or report["created_by"]==ctx["user"]["id"] and ctx["membership"]["role"]!="reader"
 
 
 def report_contract(report: dict) -> dict:
@@ -819,25 +1219,24 @@ def report_contract(report: dict) -> dict:
 @app.get("/api/v1/workspaces/{workspace_id}/reports")
 async def reports_list(workspace_id: str, state_filter: str | None = Query(default=None, alias="state"), limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
     rows = [r for r in state.reports.values() if r.get("workspace_id") == workspace_id and (state_filter is None or r.get("state") == state_filter)]
-    if ctx["membership"]["role"] == "reader":
-        rows = [r for r in rows if r.get("published_version_id")]
+    rows=[r for r in rows if report_draft_visible(r,ctx) or r.get("published_version_id")]
     return page([report_contract(r) for r in rows], limit, cursor)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/reports/{report_id}")
 async def report_get(workspace_id: str, report_id: str, ctx: dict = Depends(workspace_user)) -> dict:
     raw = report_for(workspace_id, report_id)
-    if ctx["membership"]["role"] == "reader" and not raw.get("published_version_id"):
+    if not report_draft_visible(raw,ctx) and not raw.get("published_version_id"):
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Report not found"})
     r = report_contract(copy.deepcopy(raw))
-    if ctx["membership"]["role"] == "reader": r["current_version_id"] = None
+    if not report_draft_visible(raw,ctx): r["current_version_id"] = None
     return r
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/reports/{report_id}/versions")
 async def versions_list(workspace_id: str, report_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
     report_for(workspace_id, report_id); rows = [v for v in state.versions.values() if v.get("workspace_id") == workspace_id and v.get("report_id") == report_id]
-    if ctx["membership"]["role"] == "reader": rows = [v for v in rows if v["id"] == report_for(workspace_id, report_id).get("published_version_id")]
+    if not report_draft_visible(report_for(workspace_id,report_id),ctx): rows = [v for v in rows if v["id"] == report_for(workspace_id, report_id).get("published_version_id")]
     return page(rows, limit, cursor)
 
 
@@ -848,42 +1247,50 @@ async def version_create(workspace_id: str, report_id: str, request: Request, ct
     if not isinstance(content, dict) or not p.get("base_version_id") or not p.get("edit_note"):
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "base_version_id, content and edit_note are required"})
     base = state.versions.get(p["base_version_id"])
-    if not base or base.get("report_id") != report_id:
+    if not base or base.get("report_id") != report_id or base["id"] != report.get("current_version_id"):
         raise HTTPException(409, detail={"code": "STALE_VERSION", "message": "Base report version is not current"})
-    versions = [v for v in state.versions.values() if v.get("report_id") == report_id]; v = {"id": uid(), "workspace_id": workspace_id, "created_at": now(), "report_id": report_id, "version_no": len(versions) + 1, "content": content, "content_hash": state.hash(content), "created_by": ctx["user"]["id"], "runtime_mode": report.get("runtime_mode", "replay"), "claim_ids": [uid() for _ in content.get("claims", [])]}
+    if report["created_by"] != ctx["user"]["id"] and ctx["membership"]["role"] == "analyst":
+        raise HTTPException(403,detail={"code":"FORBIDDEN","message":"Only the author may edit this draft"})
+    validate_report_content(workspace_id,content)
+    versions = [v for v in state.versions.values() if v.get("report_id") == report_id]; v = {"id": uid(), "workspace_id": workspace_id, "created_at": now(), "report_id": report_id, "version_no": len(versions) + 1, "content": content, "content_hash": state.hash(content), "created_by": ctx["user"]["id"], "runtime_mode": base.get("runtime_mode", os.getenv("PHARMA_RUNTIME_MODE", "live")), "claim_ids": [uid() for _ in content.get("claims", [])]}
     state.versions[v["id"]] = v; report["current_version_id"] = v["id"]; report["state"] = "draft"; report["updated_at"] = now(); return JSONResponse(status_code=201, content=v)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/reports/{report_id}/versions/{version_id}")
 async def version_get(workspace_id: str, report_id: str, version_id: str, ctx: dict = Depends(workspace_user)) -> dict:
     report_for(workspace_id, report_id); v = state.versions.get(version_id)
-    if not v or v.get("report_id") != report_id or (ctx["membership"]["role"] == "reader" and v["id"] != report_for(workspace_id, report_id).get("published_version_id")):
+    if not v or v.get("report_id") != report_id or (not report_draft_visible(report_for(workspace_id,report_id),ctx) and v["id"] != report_for(workspace_id, report_id).get("published_version_id")):
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Report version not found"})
     return v
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/reports/{report_id}/submit-review")
 async def submit_review(workspace_id: str, report_id: str, request: Request, ctx: dict = Depends(csrf)) -> dict:
-    require_role(ctx, "analyst", "admin")
-    r = report_for(workspace_id, report_id); r["state"] = "in_review"; r["submitted_at"] = now(); r["updated_at"] = r["submitted_at"]; return report_contract(r)
+    require_role(ctx, "analyst", "reviewer", "admin")
+    r = report_for(workspace_id, report_id)
+    if r["state"] not in ("draft","changes_requested"): raise HTTPException(409,detail={"code":"INVALID_STATE","message":"Only a draft can be submitted"})
+    if r["created_by"] != ctx["user"]["id"] and ctx["membership"]["role"]=="analyst": raise HTTPException(403,detail={"code":"FORBIDDEN","message":"Only the author can submit this report"})
+    r["state"] = "in_review"; r["submitted_at"] = now(); r["updated_at"] = r["submitted_at"]; return report_contract(r)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/reports/{report_id}/reviews")
 async def reviews_list(workspace_id: str, report_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    report_for(workspace_id, report_id); return page([x for x in state.reviews.values() if x["workspace_id"] == workspace_id and x["report_id"] == report_id], limit, cursor)
+    report_for(workspace_id, report_id); return page([{k:v for k,v in x.items() if k!="report_id"} for x in state.reviews.values() if x["workspace_id"] == workspace_id and x["report_id"] == report_id], limit, cursor)
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/reports/{report_id}/reviews")
 async def review_create(workspace_id: str, report_id: str, request: Request, ctx: dict = Depends(csrf)) -> dict:
     require_role(ctx, "reviewer", "admin")
     r = report_for(workspace_id, report_id); p = await request.json(); vid, ch = p.get("version_id"), p.get("content_hash"); v = state.versions.get(vid)
-    if p.get("decision") not in ("approve", "request_changes") or not p.get("note"):
+    if p.get("decision")=="request_changes": p["decision"]="reject"
+    if p.get("decision") not in ("approve", "reject") or not p.get("note"):
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "decision and note are required"})
     if not v or v.get("report_id") != report_id or v.get("content_hash") != ch: raise HTTPException(409, detail={"code": "STALE_VERSION", "message": "Version hash does not match"})
-    if v.get("created_by") == ctx["user"]["id"]: raise HTTPException(409, detail={"code": "SELF_REVIEW_FORBIDDEN", "message": "Author cannot review own version"})
+    if ctx["user"]["id"] in (v.get("created_by"), r.get("created_by")): raise HTTPException(409, detail={"code": "SELF_REVIEW_FORBIDDEN", "message": "Author cannot review own version"})
     if p.get("decision") not in ("approve", "reject") or not isinstance(p.get("note"), str) or not p["note"].strip():
         raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "decision and note are required"})
-    rv = {"id": uid(), "workspace_id": workspace_id, "created_at": now(), "report_id": report_id, "version_id": vid, "content_hash": ch, "decision": p["decision"], "note": p["note"], "reviewer_id": ctx["user"]["id"]}; state.reviews[rv["id"]] = rv; r["state"] = "approved" if rv["decision"] == "approve" else "changes_requested"; return rv
+    if r["state"] != "in_review" or vid != r.get("current_version_id"): raise HTTPException(409,detail={"code":"INVALID_STATE","message":"Review requires the current submitted version"})
+    rv = {"id": uid(), "workspace_id": workspace_id, "created_at": now(), "report_id": report_id, "version_id": vid, "content_hash": ch, "decision": p["decision"], "note": p["note"], "reviewer_id": ctx["user"]["id"]}; state.reviews[rv["id"]] = rv; r["state"] = "approved" if rv["decision"] == "approve" else "changes_requested"; return JSONResponse(status_code=201,content={k:v for k,v in rv.items() if k!="report_id"})
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/reports/{report_id}/publish")
@@ -898,8 +1305,10 @@ async def publish(workspace_id: str, report_id: str, request: Request, ctx: dict
             return state.idempotency[key][1]
     if not v or v.get("workspace_id") != workspace_id or v.get("report_id") != report_id or v.get("content_hash") != ch: raise HTTPException(409, detail={"code": "STALE_VERSION", "message": "Version hash does not match"})
     approved = any(x.get("version_id") == vid and x.get("decision") == "approve" and x.get("content_hash") == ch for x in state.reviews.values())
+    if r.get("state") != "approved" or r.get("current_version_id") != vid: raise HTTPException(409,detail={"code":"STALE_VERSION","message":"Publish requires the current approved version"})
     if not approved: raise HTTPException(409, detail={"code": "REPORT_NOT_APPROVED", "message": "Report version has not been approved"})
     r.update({"published_version_id": vid, "current_version_id": vid, "state": "published", "published_at": now(), "published_by": ctx["user"]["id"], "updated_at": now()})
+    queue_report_deliveries(r,v)
     if idempotency_key:
         state.idempotency[(workspace_id + ":publish:" + report_id, idempotency_key)] = (state.hash(p), r)
     return report_contract(r)
@@ -918,7 +1327,7 @@ async def retract(workspace_id: str, report_id: str, request: Request, ctx: dict
 @app.get("/api/v1/workspaces/{workspace_id}/reports/{report_id}/export")
 async def report_export(workspace_id: str, report_id: str, version_id: str | None = None, format: str = "json", ctx: dict = Depends(workspace_user)) -> Response:
     r = report_for(workspace_id, report_id); vid = version_id or r.get("published_version_id") or r.get("current_version_id"); v = state.versions.get(vid)
-    if not v: raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Version not found"})
+    if not v or v.get("report_id")!=report_id or v.get("workspace_id")!=workspace_id or (not report_draft_visible(r,ctx) and (vid!=r.get("published_version_id") or r.get("state")=="retracted")): raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Version not found"})
     if format == "markdown":
         c = v.get("content", {}); text = f"# {c.get('title', r.get('title', 'Research report'))}\n\n{c.get('summary', '')}\n"
         for section in c.get("sections", []): text += f"\n## {section.get('heading', '')}\n\n{section.get('text', '')}\n"
@@ -940,23 +1349,71 @@ async def notices(workspace_id: str, report_id: str, limit: int = 20, cursor: st
     report_for(workspace_id, report_id); return page([n for n in state.notices if n["workspace_id"] == workspace_id and n["report_id"] == report_id], limit, cursor)
 
 
+def queue_report_deliveries(report,version):
+    run=state.runs.get(report["run_id"],{})
+    recipients={(report["created_by"],"in_app")}
+    for sub in state.subscriptions.values():
+        if sub["workspace_id"]==report["workspace_id"] and sub.get("enabled") and set(sub["drug_ids"])&set(run.get("frozen_request",{}).get("drug_ids",[])):
+            for channel in sub["channels"]: recipients.add((sub["owner_id"],channel))
+    for recipient,channel in recipients:
+        if not membership(report["workspace_id"],state.users.get(recipient,{})): continue
+        key=str(uuid.uuid5(uuid.NAMESPACE_URL,version["id"]+recipient+channel))
+        state.deliveries.setdefault(key,{"id":key,"workspace_id":report["workspace_id"],"created_at":now(),
+            "recipient_user_id":recipient,"report_id":report["id"],"version_id":version["id"],
+            "report_version_id":version["id"],"error_code":None,"accepted_at":now() if channel=="in_app" else None,
+            "channel":channel,"state":"delivered" if channel=="in_app" else "queued",
+            "subject":report["title"],"title":report["title"],"attempt":0,"read_at":None,
+            "delivered_at":now() if channel=="in_app" else None})
+    for occurrence in state.occurrences.values():
+        if occurrence.get("run_id")==report["run_id"]:
+            occurrence["state"]="delivered"
+            sub=state.subscriptions.get(occurrence["subscription_id"])
+            if sub: sub["last_delivered_at"]=now(); sub["last_outcome"]="delivered"
+
+
 def schedule_occurrences(payload: dict) -> list[dict]:
-    schedule = payload.get("schedule", payload); freq = schedule.get("frequency", "daily"); tz = schedule.get("timezone", "Asia/Shanghai"); base = datetime.now(timezone.utc)
-    out = []
-    for i in range(5):
-        dt = base + timedelta(days=i + (1 if freq == "weekly" else 0)); out.append({"utc": dt.replace(microsecond=0).isoformat().replace("+00:00", "Z"), "local": dt.strftime("%Y-%m-%d %H:%M"), "dst_adjusted": False})
+    schedule = payload.get("schedule", payload)
+    freq, tz_name, local_time = schedule.get("frequency"), schedule.get("timezone"), schedule.get("local_time")
+    if freq not in ("daily", "weekly") or not isinstance(local_time, str) or not isinstance(tz_name, str):
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "frequency, local_time and timezone are required"})
+    try:
+        zone = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError as exc:
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": f"Unknown IANA timezone: {tz_name}"}) from exc
+    try:
+        hour, minute = (int(x) for x in local_time.split(":", 1))
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59: raise ValueError
+    except ValueError as exc:
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "local_time must be HH:MM"}) from exc
+    weekday = schedule.get("weekday")
+    if (freq == "weekly" and (not isinstance(weekday, int) or not 1<=weekday<=7)) or (freq == "daily" and weekday is not None):
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "weekday must match frequency"})
+    now_local = datetime.now(timezone.utc).astimezone(zone).replace(second=0, microsecond=0)
+    out: list[dict] = []
+    for offset in range(0, 40):
+        candidate = (now_local + timedelta(days=offset)).replace(hour=hour, minute=minute)
+        if candidate <= now_local: continue
+        if freq == "weekly" and candidate.isoweekday() != weekday: continue
+        utc = candidate.astimezone(timezone.utc)
+        roundtrip = utc.astimezone(zone)
+        adjusted = roundtrip.replace(tzinfo=None) != candidate.replace(tzinfo=None)
+        if adjusted: candidate = roundtrip
+        out.append({"utc": utc.isoformat().replace("+00:00", "Z"), "local": candidate.strftime("%Y-%m-%d %H:%M"), "dst_adjusted": adjusted or candidate.utcoffset() != (candidate.replace(fold=1).utcoffset())})
+        if len(out) == 5: break
     return out
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/subscriptions")
 async def subscriptions(workspace_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    return page([s for s in state.subscriptions.values() if s["workspace_id"] == workspace_id], limit, cursor)
+    return page([s for s in state.subscriptions.values() if s["workspace_id"] == workspace_id and (s["owner_id"]==ctx["user"]["id"] or ctx["membership"]["role"]=="admin")], limit, cursor)
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/subscriptions")
 async def subscription_create(workspace_id: str, request: Request, ctx: dict = Depends(csrf)) -> dict:
     require_role(ctx, "analyst", "reviewer", "admin"); p = await request.json();
     if not p.get("name") or not p.get("drug_ids") or not p.get("schedule"): raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "name, drug_ids and schedule are required"})
+    validate_scope(workspace_id,p["drug_ids"],p.get("source_allowlist",["ctgov","pubmed"]))
+    if not p.get("channels",["in_app"]) or set(p.get("channels",["in_app"]))-{"in_app","email"}: raise HTTPException(422,detail={"code":"VALIDATION_ERROR","message":"Unsupported channel"})
     s = {"id": uid(), "workspace_id": workspace_id, "created_at": now(), "name": p["name"], "drug_ids": p["drug_ids"], "source_allowlist": p.get("source_allowlist", ["ctgov", "pubmed"]), "schedule": p["schedule"], "channels": p.get("channels", ["in_app"]), "enabled": p.get("enabled", True), "owner_id": ctx["user"]["id"], "revision": 1, "next_run_at": schedule_occurrences(p)[0]["utc"], "last_outcome": None}; state.subscriptions[s["id"]] = s; return JSONResponse(status_code=201, content=s)
 
 
@@ -968,7 +1425,7 @@ async def subscription_preview(workspace_id: str, request: Request, ctx: dict = 
 @app.get("/api/v1/workspaces/{workspace_id}/subscriptions/{subscription_id}")
 async def subscription_get(workspace_id: str, subscription_id: str, ctx: dict = Depends(workspace_user)) -> dict:
     s = state.subscriptions.get(subscription_id)
-    if not s or s["workspace_id"] != workspace_id: raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Subscription not found"})
+    if not s or s["workspace_id"] != workspace_id or (s["owner_id"]!=ctx["user"]["id"] and ctx["membership"]["role"]!="admin"): raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Subscription not found"})
     return s
 
 
@@ -976,6 +1433,8 @@ async def subscription_get(workspace_id: str, subscription_id: str, ctx: dict = 
 async def subscription_update(workspace_id: str, subscription_id: str, request: Request, ctx: dict = Depends(csrf), if_match: str | None = Header(default=None, alias="If-Match")) -> dict:
     require_role(ctx, "analyst", "reviewer", "admin"); s = await subscription_get(workspace_id, subscription_id, ctx); p = await request.json()
     if if_match and if_match.strip('"') != str(s["revision"]): raise HTTPException(409, detail={"code": "STALE_VERSION", "message": "Subscription revision is stale"})
+    validate_scope(workspace_id,p.get("drug_ids",s["drug_ids"]),p.get("source_allowlist",s["source_allowlist"]))
+    schedule_occurrences({**s,**p})
     s.update({k: p[k] for k in ("name", "drug_ids", "source_allowlist", "schedule", "channels", "enabled") if k in p}); s["revision"] += 1; s["next_run_at"] = schedule_occurrences(s)[0]["utc"]; return s
 
 
@@ -1006,19 +1465,33 @@ async def inbox_read(workspace_id: str, delivery_id: str, ctx: dict = Depends(cs
 
 @app.get("/api/v1/workspaces/{workspace_id}/deliveries")
 async def deliveries(workspace_id: str, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    return page([d for d in state.deliveries.values() if d["workspace_id"] == workspace_id], limit, cursor)
+    return page([d for d in state.deliveries.values() if d["workspace_id"] == workspace_id and (d["recipient_user_id"]==ctx["user"]["id"] or ctx["membership"]["role"]=="admin")], limit, cursor)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/deliveries/{delivery_id}")
 async def delivery_get(workspace_id: str, delivery_id: str, ctx: dict = Depends(workspace_user)) -> dict:
     d = state.deliveries.get(delivery_id)
-    if not d or d["workspace_id"] != workspace_id: raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Delivery not found"})
+    if not d or d["workspace_id"] != workspace_id or (d["recipient_user_id"]!=ctx["user"]["id"] and ctx["membership"]["role"]!="admin"): raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Delivery not found"})
     return d
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/deliveries/{delivery_id}/retry")
+async def delivery_retry(workspace_id: str, delivery_id: str, ctx: dict=Depends(csrf)) -> dict:
+    require_role(ctx,"admin")
+    delivery=state.deliveries.get(delivery_id)
+    if not delivery or delivery["workspace_id"]!=workspace_id: raise HTTPException(404,detail={"code":"NOT_FOUND","message":"Delivery not found"})
+    if delivery.get("state") not in ("failed","disabled","dry_run"): raise HTTPException(409,detail={"code":"INVALID_STATE","message":"Delivery is not retryable"})
+    delivery.update(state="queued",error_code=None)
+    return delivery
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/audit")
 async def audit(workspace_id: str, action: str | None = None, limit: int = 20, cursor: str | None = None, ctx: dict = Depends(workspace_user)) -> dict:
-    return page([a for a in state.audit if a["workspace_id"] == workspace_id and (action is None or a["action"] == action)], limit, cursor)
+    require_role(ctx,"admin","reviewer")
+    return page([{"id":a["id"],"workspace_id":workspace_id,"created_at":a["created_at"],"actor_id":a.get("actor_id",a.get("actor_user_id")),
+        "action":a["action"],"target_type":a.get("target_type",a.get("resource_type","workspace")),"target_id":a.get("target_id"),
+        "details":a.get("details",{"request_id":a.get("request_id"),"result":a.get("result")})}
+        for a in state.audit if a["workspace_id"] == workspace_id and (action is None or a["action"] == action)], limit, cursor)
 
 
 def _apply_contract_operation_ids() -> None:

@@ -32,13 +32,14 @@ class Config:
 
     CONFIG_DIR = os.path.join(os.path.dirname(__file__), "variables")
 
-    def __init__(self, config_path: str | None = None):
+    def __init__(self, config_path: str | None = None, *, lite_profile: bool = False):
         """Initialize the config class.
 
         Args:
             config_path: Optional path to a JSON configuration file.
         """
         self.config_path = config_path
+        self._lite_profile = lite_profile
         self.llm_kwargs: Dict[str, Any] = {}
         self.embedding_kwargs: Dict[str, Any] = {}
 
@@ -76,6 +77,9 @@ class Config:
             setattr(self, key.lower(), value)
 
         # Handle RETRIEVER with default value
+        if self._lite_profile:
+            self.retrievers = []
+            return
         retriever_env = os.environ.get("RETRIEVER", config.get("RETRIEVER", "tavily"))
         try:
             self.retrievers = self.parse_retrievers(retriever_env)

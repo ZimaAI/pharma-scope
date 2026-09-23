@@ -1,96 +1,49 @@
-# GPT Researcher UI
+# PharmaScope Lite 前端
 
-A React component library for integrating the GPT Researcher interface into your React applications. Take it for a test ride with the [GPTR React Starter Template](https://github.com/elishakay/gpt-researcher-react), or simply:
+Next.js 14 静态导出工作台。两种运行模式都使用真实 HTTP API 和 Cookie 会话；前端不保存 demo 数组，也不会在 API 失败时返回演示数据。
 
-<div align="center" id="top">
-
-<img src="https://github.com/assafelovic/gpt-researcher/assets/13554167/20af8286-b386-44a5-9a83-3be1365139c3" alt="Logo" width="80">
-
-####
-
-[![Website](https://img.shields.io/badge/Official%20Website-gptr.dev-teal?style=for-the-badge&logo=world&logoColor=white&color=0891b2)](https://gptr.dev)
-[![Documentation](https://img.shields.io/badge/Documentation-DOCS-f472b6?logo=googledocs&logoColor=white&style=for-the-badge)](https://docs.gptr.dev)
-[![Discord Follow](https://dcbadge.vercel.app/api/server/QgZXvJAccX?style=for-the-badge&theme=clean-inverted&?compact=true)](https://discord.gg/QgZXvJAccX)
-
-[![PyPI version](https://img.shields.io/pypi/v/gpt-researcher?logo=pypi&logoColor=white&style=flat)](https://badge.fury.io/py/gpt-researcher)
-![GitHub Release](https://img.shields.io/github/v/release/assafelovic/gpt-researcher?style=flat&logo=github)
-[![Open In Colab](https://img.shields.io/static/v1?message=Open%20in%20Colab&logo=googlecolab&labelColor=grey&color=yellow&label=%20&style=flat&logoSize=40)](https://colab.research.google.com/github/assafelovic/gpt-researcher/blob/master/docs/docs/examples/pip-run.ipynb)
-[![Docker Image Version](https://img.shields.io/docker/v/elestio/gpt-researcher/latest?arch=amd64&style=flat&logo=docker&logoColor=white&color=1D63ED)](https://hub.docker.com/r/gptresearcher/gpt-researcher)
-
-[English](README.md) | [中文](README-zh_CN.md) | [日本語](README-ja_JP.md) | [한국어](README-ko_KR.md)
-
-</div>
-
-# 🔎 GPT Researcher
-
-**GPT Researcher is an open deep research agent designed for both web and local research on any given task.** 
-
-The agent produces detailed, factual, and unbiased research reports with citations. GPT Researcher provides a full suite of customization options to create tailor made and domain specific research agents. Inspired by the recent [Plan-and-Solve](https://arxiv.org/abs/2305.04091) and [RAG](https://arxiv.org/abs/2005.11401) papers, GPT Researcher addresses misinformation, speed, determinism, and reliability by offering stable performance and increased speed through parallelized agent work.
-
-**Our mission is to empower individuals and organizations with accurate, unbiased, and factual information through AI.**
-
-
-## Installation
+## 构建
 
 ```bash
-npm install gpt-researcher-ui
+npm --prefix frontend/nextjs install --legacy-peer-deps
+NEXT_PUBLIC_PHARMA_API_URL='' npm --prefix frontend/nextjs run build
 ```
 
-## Usage
+产物位于 `frontend/nextjs/out`。生产环境由独立 Nginx 提供静态文件，`/api/`、`/healthz`、`/readyz` 反代到 PharmaScope API。浏览器默认同源，构建不写入 `localhost:8000`。`NEXT_PUBLIC_PHARMA_API_URL` 仅在明确需要跨域开发时指定。
 
-```javascript
-import React from 'react';
-import { GPTResearcher } from 'gpt-researcher-ui';
+模式由 `/healthz` 与 `/api/v1/auth/me` 返回的 `runtime_mode` 确认。`NEXT_PUBLIC_PHARMA_RUNTIME_MODE=replay` 只是初始界面配置，无法把 live API 转成演示数据。replay 的虚构数据在演示 API 服务端加载；live 接口失败只显示错误。
 
-function App() {
-  return (
-    <div className="App">
-      <GPTResearcher 
-        apiUrl="http://localhost:8000"
-        defaultPrompt="What is quantum computing?"
-        onResultsChange={(results) => console.log('Research results:', results)}
-      />
-    </div>
-  );
-}
+不再注册离线 PWA worker，避免会话和工作区业务数据被旧缓存复用。`public/sw.js` 会退役已有安装的旧 worker。
 
-export default App;
+## 已联调功能
+
+- 登录、登出、CSRF、工作区切换与成员角色管理。
+- 药物建档与筛选、试验和文献投影、观察历史、原始快照、事件修订和证据抽屉。
+- 来源同步、任务轮询、候选药物关联的确认 / 拒绝 / 撤销。
+- 研究范围、来源和预算；命名 SSE 事件、Last-Event-ID 恢复、断线重连、取消和重试。
+- 完整报告正文、版本 / hash、证据、修订、独立审核、退回和发布。
+- 每日 / 每周订阅、IANA 时区预览、暂停、立即调度、投递记录和站内通知。
+- 401 / 403 / 404 / 409 / 422 / 5xx 与 request ID，加载及空状态。
+
+研究候选关联需要 reviewer / admin 在「工作区与关联审核」确认后，才能作为 live 研究证据。真实模型、SMTP 和来源密钥仅配置在服务端，不进入浏览器。
+
+## 浏览器验证
+
+```bash
+.venv/bin/python -m playwright install chromium
+npm --prefix frontend/nextjs run build
+.venv/bin/python scripts/test_frontend_e2e.py
 ```
 
-## Advanced Usage
+脚本启动独立临时端口的真实 replay API，使用 Chromium 验证生产静态导出。登录、CSRF、创建、研究、SSE、版本、审核、订阅、来源任务与工作区均请求实际 API；只有错误展示测试注入明确的失败响应。脚本不调用真实模型或邮件，也不将 replay 结果当成 live 验证。结果写入 `outputs/frontend-e2e-results.json`，测试 API 自动清理。
 
-```javascript
-import React, { useState } from 'react';
-import { GPTResearcher } from 'gpt-researcher-ui';
+完整 PostgreSQL / worker / Nginx 运维参见 [项目运维说明](../../docs/PHARMASCOPE_OPERATIONS.md)。
 
-function App() {
-  const [results, setResults] = useState([]);
+真实来源的 LIVE 浏览器检查单独执行（需要独立测试 PostgreSQL 和外网）：
 
-  const handleResultsChange = (newResults) => {
-    setResults(newResults);
-    console.log('Research progress:', newResults);
-  };
-
-  return (
-    <div className="App">
-      <h1>My Research Application</h1>
-      
-      <GPTResearcher 
-        apiUrl="http://localhost:8000"
-        apiKey="your-api-key-if-needed"
-        defaultPrompt="Explain the impact of quantum computing on cryptography"
-        onResultsChange={handleResultsChange}
-      />
-      
-      {/* You can use the results state elsewhere in your app */}
-      <div className="results-summary">
-        {results.length > 0 && (
-          <p>Research in progress: {results.length} items processed</p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-export default App;
+```bash
+PHARMA_TEST_DATABASE_URL=postgresql+psycopg://pharma_test@127.0.0.1:18432/pharmascope_test \
+  .venv/bin/python scripts/test_live_frontend.py
 ```
+
+该脚本创建随机 schema、CLI 账号、live API 和独立 worker，真实同步一条 ClinicalTrials.gov 记录，浏览器验证 LIVE 标签、NCT 记录、观察 / 快照 / hash、来源部分完成和候选关联审核。它显式移除测试子进程中的 NCBI 与模型凭据，验证缺少身份和模型配置时的真实失败状态，不生成成功的模型结果。结束后清理 schema 与进程；证据位于 `outputs/live-frontend-results.json` 与 `outputs/live-browser-*.png`。来源任务可通过 `/settings?job_id=...` 在刷新后重新查看。

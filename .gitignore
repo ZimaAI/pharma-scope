@@ -53,3 +53,15 @@ server_log.txt
 CURSOR_RULES.md
 /.claude/worktrees/
 /.history
+
+# PharmaScope private configuration and runtime data
+.env.*
+!.env.example
+!.env.example.live
+!.env.example.demo
+!.env.example.test
+!backend/requirements-runtime.lock
+!frontend/nextjs/package-lock.json
+backups/
+*.dump
+!.env.example.development

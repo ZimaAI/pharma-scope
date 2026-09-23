@@ -1,91 +1,137 @@
 #!/usr/bin/env bash
+# Upgrade PharmaScope only. Existing Nginx sites and unrelated units are retained.
 set -Eeuo pipefail
-
-DOMAIN="pharmascope.zimagent.top"
-API_PORT="18180"
+DOMAIN=pharmascope.zimagent.top
+API_PORT=18180
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 TARGET_USER="${SUDO_USER:-$(stat -c '%U' "$REPO_ROOT")}"
-WEB_ROOT="/var/www/pharmascope/current"
-ACME_ROOT="/var/www/pharmascope-acme"
-NGINX_SITE="/etc/nginx/sites-available/pharmascope"
-NGINX_LINK="/etc/nginx/sites-enabled/pharmascope"
-SYSTEM_UNIT="/etc/systemd/system/pharmascope-api.service"
-
+ENV_FILE="${PHARMA_ENV_FILE:-/etc/pharmascope/pharmascope.env}"
+WEB_BASE=/var/www/pharmascope
+ACME_ROOT=/var/www/pharmascope-acme
+NGINX_SITE=/etc/nginx/sites-available/pharmascope
+NGINX_LINK=/etc/nginx/sites-enabled/pharmascope
 log() { printf '\n==> %s\n' "$*"; }
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
-
-if [[ "${EUID}" -ne 0 ]]; then
-  exec sudo bash "$0" "$@"
+[[ "${1:-}" == --help ]] && { echo 'Usage: sudo PHARMA_ENV_FILE=/etc/pharmascope/pharmascope.env bash deploy/install.sh [--check]'; exit 0; }
+[[ "${1:-}" == --check || "$EUID" == 0 ]] || die 'Root is required to install this project’s systemd units and Nginx site. Run the command shown by --help.'
+[[ -r "$ENV_FILE" ]] || die "Private configuration missing or unreadable: $ENV_FILE. Copy .env.example.demo or .env.example.live there and configure PostgreSQL first."
+ENV_FILE="$(realpath -- "$ENV_FILE")"
+[[ -x "$REPO_ROOT/.venv/bin/python" && -x "$REPO_ROOT/.venv/bin/uvicorn" ]] || die 'Run make setup first.'
+id "$TARGET_USER" >/dev/null || die "Unknown deployment user: $TARGET_USER"
+TARGET_GROUP="$(id -gn "$TARGET_USER")"
+PYTHON="$REPO_ROOT/.venv/bin/python"
+RUNTIME_MODE="$($PYTHON "$SCRIPT_DIR/env-run.py" "$ENV_FILE" "$PYTHON" -c 'import os; mode=os.environ.get("PHARMA_RUNTIME_MODE"); assert mode in ("replay", "live"), "PHARMA_RUNTIME_MODE must be replay or live"; assert os.environ.get("PHARMA_DATABASE_URL", "").startswith("postgres"), "PHARMA_DATABASE_URL must configure PostgreSQL"; assert os.environ.get("PHARMA_COOKIE_SECURE") == "1", "Public HTTPS deployment requires PHARMA_COOKIE_SECURE=1"; assert os.environ.get("PHARMA_PUBLIC_ORIGIN") == "https://pharmascope.zimagent.top", "Set PHARMA_PUBLIC_ORIGIN=https://pharmascope.zimagent.top"; print(mode)')"
+for command in nginx curl systemctl runuser; do command -v "$command" >/dev/null || die "Missing prerequisite: $command"; done
+if ss -ltn "sport = :$API_PORT" | tail -n +2 | grep -q LISTEN; then
+  pgrep -af "uvicorn.*backend\.pharma_scope_app:app.*--port ${API_PORT}" >/dev/null || die "Port $API_PORT belongs to another project."
 fi
-
-id -u "$TARGET_USER" >/dev/null 2>&1 || die "找不到部署用户: ${TARGET_USER}"
-TARGET_UID="$(id -u "$TARGET_USER")"
-
-log "检查端口 ${API_PORT}"
-if ss -ltn "sport = :${API_PORT}" | tail -n +2 | grep -q LISTEN; then
-  if ! pgrep -af "uvicorn.*backend\.pharma_scope_app:app.*--port ${API_PORT}" >/dev/null; then
-    die "端口 ${API_PORT} 已被其他进程占用，为避免影响现有项目，部署已停止。"
-  fi
+if [[ -e "$NGINX_SITE" ]] && ! grep -q "server_name ${DOMAIN}" "$NGINX_SITE"; then
+  die "$NGINX_SITE is not the PharmaScope site; refusing to overwrite it."
 fi
-
-log "构建前端"
-runuser -u "$TARGET_USER" -- bash -lc "
+if [[ -e "$NGINX_LINK" || -L "$NGINX_LINK" ]]; then
+  [[ -L "$NGINX_LINK" && "$(readlink -f "$NGINX_LINK")" == "$NGINX_SITE" ]] || die "$NGINX_LINK belongs to another site."
+fi
+if [[ "${1:-}" == --check ]]; then
+  log "Prerequisites checked; mode=$RUNTIME_MODE, API=127.0.0.1:$API_PORT. No files or services changed."
+  exit 0
+fi
+exec 9>/run/lock/pharmascope-install.lock
+flock -n 9 || die "Another PharmaScope installation is running."
+cd "$REPO_ROOT"
+# systemd can read the secret file as root; only the selected deployment group
+# can read it during migration. Never evaluate environment values as shell code.
+if [[ "$(dirname -- "$ENV_FILE")" == /etc/pharmascope ]]; then
+  chown root:"$TARGET_GROUP" /etc/pharmascope
+  chmod 0750 /etc/pharmascope
+fi
+chown root:"$TARGET_GROUP" "$ENV_FILE"
+chmod 0640 "$ENV_FILE"
+run_env() { runuser -u "$TARGET_USER" -- "$PYTHON" "$SCRIPT_DIR/env-run.py" "$ENV_FILE" "$@"; }
+log 'Install the locked runtime dependencies'
+runuser -u "$TARGET_USER" -- "$REPO_ROOT/.venv/bin/pip" install -r "$REPO_ROOT/backend/requirements-runtime.lock"
+log 'Build the static frontend using same-origin API requests'
+runuser -u "$TARGET_USER" -- env PHARMA_BUILD_ROOT="$REPO_ROOT" PHARMA_BUILD_MODE="$RUNTIME_MODE" bash -lc '
   set -Eeuo pipefail
-  cd '$REPO_ROOT'
-  if [[ -s \"\$HOME/.nvm/nvm.sh\" ]]; then . \"\$HOME/.nvm/nvm.sh\"; fi
-  command -v npm >/dev/null || { echo '找不到 npm' >&2; exit 1; }
-  NEXT_PUBLIC_PHARMA_API_URL='https://${DOMAIN}' \\
-  NEXT_PUBLIC_PHARMA_WORKSPACE_ID='dee59b72-2cb2-5255-934c-b44a3fd8911c' \\
-  npm --prefix frontend/nextjs run build
-"
+  if [[ -s "$HOME/.nvm/nvm.sh" ]]; then . "$HOME/.nvm/nvm.sh"; fi
+  cd "$PHARMA_BUILD_ROOT"
+  npm --prefix frontend/nextjs ci --legacy-peer-deps
+  NEXT_PUBLIC_PHARMA_API_URL="" NEXT_PUBLIC_PHARMA_RUNTIME_MODE="$PHARMA_BUILD_MODE" npm --prefix frontend/nextjs run build
+'
+log 'Back up PostgreSQL and apply migrations (failure stops publication)'
+install -d -m 0700 -o "$TARGET_USER" -g "$TARGET_GROUP" /var/backups/pharmascope
+run_env "$PYTHON" "$SCRIPT_DIR/backup.py" /var/backups/pharmascope
+run_env "$REPO_ROOT/.venv/bin/alembic" upgrade head
 
-log "安装静态前端"
-install -d -o root -g root "$WEB_ROOT" "$ACME_ROOT"
-rm -rf "${WEB_ROOT}.new"
-install -d -o root -g root "${WEB_ROOT}.new"
-cp -a "$REPO_ROOT/frontend/nextjs/out/." "${WEB_ROOT}.new/"
-rm -rf "$WEB_ROOT"
-mv "${WEB_ROOT}.new" "$WEB_ROOT"
-
-log "切换 API 为 systemd 服务"
-if [[ -S "/run/user/${TARGET_UID}/bus" ]]; then
-  runuser -u "$TARGET_USER" -- env \
-    XDG_RUNTIME_DIR="/run/user/${TARGET_UID}" \
-    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${TARGET_UID}/bus" \
-    systemctl --user disable --now pharmascope-api.service >/dev/null 2>&1 || true
-fi
-
-install -m 0644 "$REPO_ROOT/deploy/pharmascope-api.service" "$SYSTEM_UNIT"
-sed -i \
-  -e "s#^User=.*#User=${TARGET_USER}#" \
-  -e "s#^Group=.*#Group=${TARGET_USER}#" \
-  -e "s#^WorkingDirectory=.*#WorkingDirectory=${REPO_ROOT}#" \
-  -e "s#^ExecStart=.*#ExecStart=${REPO_ROOT}/.venv/bin/uvicorn backend.pharma_scope_app:app --host 127.0.0.1 --port ${API_PORT} --workers 1#" \
-  "$SYSTEM_UNIT"
+log 'Install this project’s units'
+for component in api worker; do
+  unit="/etc/systemd/system/pharmascope-${component}.service"
+  install -m 0644 "$SCRIPT_DIR/pharmascope-${component}.service" "$unit"
+  # Paths are passed as arguments and replaced in Python, without sed escaping.
+  "$PYTHON" - "$unit" "$TARGET_USER" "$TARGET_GROUP" "$REPO_ROOT" "$ENV_FILE" "$component" <<'PY'
+from pathlib import Path
+import sys
+path, user, group, root, env, component = sys.argv[1:]
+command = root + ('/.venv/bin/uvicorn backend.pharma_scope_app:app --host 127.0.0.1 --port 18180 --workers 1' if component == 'api' else '/.venv/bin/python -m backend.worker')
+values = {'User': user, 'Group': group, 'WorkingDirectory': root, 'EnvironmentFile': env, 'ExecStart': command}
+p = Path(path)
+p.write_text('\n'.join(k + '=' + values[k] if (k := line.split('=', 1)[0]) in values else line for line in p.read_text().splitlines()) + '\n')
+PY
+done
 systemctl daemon-reload
-systemctl enable --now pharmascope-api.service
+systemctl enable pharmascope-api.service pharmascope-worker.service
+systemctl restart pharmascope-api.service pharmascope-worker.service
+for attempt in {1..30}; do
+  if curl --fail --silent --max-time 2 "http://127.0.0.1:$API_PORT/readyz" >/dev/null; then break; fi
+  [[ "$attempt" != 30 ]] || die 'API readiness failed; existing public static release retained. Check journalctl -u pharmascope-api.'
+  sleep 1
+done
 
-log "安装临时 HTTP Nginx 配置"
-install -m 0644 "$REPO_ROOT/deploy/pharmascope.nginx.initial.conf" "$NGINX_SITE"
-ln -sfn "$NGINX_SITE" "$NGINX_LINK"
-nginx -t
-systemctl reload nginx
-
-if [[ ! -s "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" || ! -s "/etc/letsencrypt/live/${DOMAIN}/privkey.pem" ]]; then
-  log "申请 TLS 证书"
-  certbot certonly --webroot -w "$ACME_ROOT" -d "$DOMAIN" \
-    --non-interactive --agree-tos --register-unsafely-without-email
+log 'Publish a versioned static release'
+RELEASE="$WEB_BASE/releases/$(date -u +%Y%m%dT%H%M%S)-$$"
+install -d -m 0755 "$WEB_BASE/releases" "$RELEASE" "$ACME_ROOT"
+cp -a "$REPO_ROOT/frontend/nextjs/out/." "$RELEASE/"
+chown -R root:root "$RELEASE"
+chmod -R a+rX "$RELEASE"
+if [[ -d "$WEB_BASE/current" && ! -L "$WEB_BASE/current" ]]; then
+  mv "$WEB_BASE/current" "$WEB_BASE/releases/legacy-$(date -u +%Y%m%dT%H%M%S)-$$"
 fi
+ln -sfn "$RELEASE" "$WEB_BASE/current.new"
+mv -Tf "$WEB_BASE/current.new" "$WEB_BASE/current"
 
-log "切换最终 HTTPS Nginx 配置"
-install -m 0644 "$REPO_ROOT/deploy/pharmascope.nginx.conf" "$NGINX_SITE"
-nginx -t
-systemctl reload nginx
-
-log "验证部署"
-systemctl is-active --quiet pharmascope-api.service || die "API 服务未运行"
-curl --fail --silent --show-error "http://127.0.0.1:${API_PORT}/healthz"
-printf '\n'
-curl --fail --silent --show-error "https://${DOMAIN}/healthz"
-printf '\n\nPharmaScope 已部署: https://${DOMAIN}\n'
+# Roll back only our Nginx site if validation fails. Existing certificates never
+# go through an HTTP-only deployment window. Reload retains other sites/workers.
+install_nginx() {
+  local template="$1" backup
+  backup="$(mktemp /tmp/pharmascope-nginx.XXXXXX)"
+  local existed=0
+  if [[ -f "$NGINX_SITE" ]]; then cp -a "$NGINX_SITE" "$backup"; existed=1; fi
+  install -m 0644 "$template" "$NGINX_SITE"
+  ln -sfn "$NGINX_SITE" "$NGINX_LINK"
+  if ! nginx -t; then
+    if [[ "$existed" == 1 ]]; then cp -a "$backup" "$NGINX_SITE"; else rm -f "$NGINX_LINK" "$NGINX_SITE"; fi
+    rm -f "$backup"
+    die 'Nginx validation failed. The previous PharmaScope site was restored; Nginx was not reloaded.'
+  fi
+  rm -f "$backup"
+  systemctl reload nginx
+}
+has_tls() { [[ -s "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" && -s "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]]; }
+if has_tls; then
+  install_nginx "$SCRIPT_DIR/pharmascope.nginx.conf"
+else
+  install_nginx "$SCRIPT_DIR/pharmascope.nginx.initial.conf"
+  if [[ "${PHARMA_SKIP_TLS:-0}" != 1 ]] && command -v certbot >/dev/null; then
+    args=(certonly --webroot -w "$ACME_ROOT" -d "$DOMAIN" --non-interactive --agree-tos)
+    if [[ -n "${ACME_EMAIL:-}" ]]; then args+=(--email "$ACME_EMAIL"); else args+=(--register-unsafely-without-email); fi
+    certbot "${args[@]}" || log 'ACME failed; resolve DNS/port 80 and rerun this script.'
+  fi
+  if has_tls; then install_nginx "$SCRIPT_DIR/pharmascope.nginx.conf"; fi
+fi
+systemctl is-active --quiet pharmascope-api.service pharmascope-worker.service || die 'A PharmaScope service failed.'
+if has_tls; then
+  "$SCRIPT_DIR/verify.sh" "https://$DOMAIN" "http://127.0.0.1:$API_PORT"
+  log "Deployment verified: https://$DOMAIN ($RUNTIME_MODE)"
+else
+  die 'HTTP is available but TLS is not configured. This deployment is not release ready; fix ACME/DNS and rerun.'
+fi

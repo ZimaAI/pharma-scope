@@ -1,7 +1,7 @@
 {
   "type": "offline DOM prototype smoke test",
   "date": "2026-09-22",
-  "browser": "144.0.7559.96",
+  "browser": "148.0.7778.96",
   "method": "Playwright set_content; no network navigation",
   "passed": 27,
   "checks": [

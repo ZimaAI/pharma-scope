@@ -1,28 +1,9 @@
-import withPWAInit from "@ducanh2912/next-pwa";
-
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'export',
-  images: {
-    remotePatterns: [
-      {
-        hostname: 'www.google.com',
-      },
-      {
-        hostname: 'www.google-analytics.com',
-      },
-      {
-        hostname: 'localhost',
-      }
-    ],
-  },
+  output: "export",
+  // Authenticated research data is always fetched from the same-origin API.
+  // Do not register the former offline worker: its runtime cache could hide
+  // source failures or reuse a previous session's responses.
+  images: { unoptimized: true },
 };
-
-const withPWA = withPWAInit({
-  dest: "public",
-  register: true,
-  skipWaiting: true,
-  disable: process.env.NODE_ENV === "development",
-});
-
-export default withPWA(nextConfig);
+export default nextConfig;

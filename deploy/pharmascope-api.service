@@ -9,15 +9,20 @@ User=zima
 Group=zima
 WorkingDirectory=/home/zima/Develop/Projects/pharma-scope
 ExecStart=/home/zima/Develop/Projects/pharma-scope/.venv/bin/uvicorn backend.pharma_scope_app:app --host 127.0.0.1 --port 18180 --workers 1
-Restart=on-failure
+Restart=always
 RestartSec=5
-Environment=PHARMA_RUNTIME_MODE=replay
+TimeoutStopSec=35
+UMask=0077
+TasksMax=128
+SyslogIdentifier=pharmascope-api
+EnvironmentFile=/etc/pharmascope/pharmascope.env
 Environment=PHARMA_ALLOW_DEV_HEADER=0
 Environment=PHARMA_COOKIE_SECURE=1
-Environment=PHARMA_DEMO_PASSWORD=demo
 Environment=CORS_ALLOW_ORIGINS=https://pharmascope.zimagent.top,http://pharmascope.zimagent.top
 NoNewPrivileges=true
 PrivateTmp=true
+MemoryMax=768M
+CPUQuota=75%
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

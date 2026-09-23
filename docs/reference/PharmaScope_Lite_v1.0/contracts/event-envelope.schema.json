@@ -36,7 +36,16 @@
             "run.failed",
             "run.cancel_requested",
             "run.cancelled",
-            "run.recovery_required"
+            "run.recovery_required",
+            "model.started",
+            "model.completed",
+            "model.failed",
+            "researcher.imported",
+            "research.checkpoint",
+            "run.resumed",
+            "research.started",
+            "research.completed",
+            "research.failed"
           ]
         },
         "payload": {

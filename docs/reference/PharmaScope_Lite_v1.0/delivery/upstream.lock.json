@@ -1,11 +1,22 @@
 {
-  "project": "PharmaScope Lite",
-  "document_version": "1.0.0",
+  "package": "gpt-researcher",
+  "version": "0.14.7",
   "repository": "https://github.com/assafelovic/gpt-researcher",
-  "commit_sha": null,
-  "package_version": null,
-  "python_version": null,
-  "patchset_sha256": null,
-  "verification_status": "NOT_RUN",
-  "notes": "Official source reviewed 2026-09-22; M0 must install, pin and validate. main is NOT a deployment lock."
+  "commit": "8da8d8f85d7124649bb059ce1b2106ed3d3f5ea5",
+  "license": "MIT",
+  "locked_at": "2026-09-23",
+  "notes": "PharmaScope invokes GPTResearcher only through backend/research.py (bounded adapter); backend/gptr_adapter.py contains the import/configuration probe.",
+  "runtime_lock": "backend/requirements-runtime.lock",
+  "runtime_lock_sha256": "c9342b535db52793bf04aedfc2884798bc5c5a354ff49731785d8be4b55d8134",
+  "local_extensions": [
+    "gpt_researcher/agent.py: Lite conductor/writer factories",
+    "gpt_researcher/config/config.py: skip unused retriever discovery in Lite profile"
+  ],
+  "validation": {
+    "fresh_environment_import": "PASS",
+    "fresh_environment_pip_check": "PASS",
+    "real_ctgov": "PASS",
+    "real_pubmed": "BLOCKED: NCBI_EMAIL missing",
+    "real_model": "BLOCKED: OPENAI_API_KEY/model missing"
+  }
 }

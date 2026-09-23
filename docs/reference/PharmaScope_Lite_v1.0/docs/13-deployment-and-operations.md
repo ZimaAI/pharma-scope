@@ -1,8 +1,8 @@
 # 13｜部署、配置与运维手册
 
 ## 1. 当前可运行与不可运行
-可运行：`prototype/index.html`离线原型；`python scripts/verify_context.py`文档/合同校验。
-待实现：真实FastAPI/Worker、GPTR Fork、数据库迁移、Docker镜像、SMTP。`deploy/compose.target.yaml`是待实现服务的部署模板，镜像使用必须填的变量，不是已经存在的可下载产品。
+可运行：`prototype/index.html`离线原型；FastAPI replay/live 进程；`deploy/docker-compose.yml` 的 PostgreSQL/API/Worker/静态 web 服务；`python scripts/verify_context.py` 文档/合同校验。真实 live 是否可用仍取决于外部数据库、来源和模型凭据。
+`deploy/compose.target.yaml` 保留为规格包中的目标镜像合同；实际可运行 Compose 和当前主机 systemd/Nginx 安装位于仓库根目录 `deploy/`。
 
 ## 2. 环境拆分
 `demo`使用fixture/replay，不要求模型密钥；`live`只允许官方适配器/真实模型。live缺凭据启动诊断失败，不回退demo。原型没有live模式。
@@ -12,7 +12,7 @@
 `config/lite.yaml`是项目非敏感配置；`.env.example`列环境变量。上游模型/Embedding配置映射只能由adapter实现，禁止逐请求修改全局os.environ造成串用户。API不持有模型Key，只有Worker持有。
 密钥写部署环境/只读secret文件，不进Git/日志/报告。SMTP默认关闭，只有显式授权后启用外发；开发用测试邮箱或本地捕获器。source requests使用开发者tool/email身份，不传用户邮箱。
 
-## 4. 部署顺序（服务实现后）
+## 4. 部署顺序
 锁定依赖和GPTR提交→构建镜像→准备数据库/文件卷→执行迁移→创建管理员/工作区→写环境变量→启动PG/API/Worker/Nginx→health/readiness→fixture smoke→live来源小查询→live单任务→检查用量与内存→才开放访问。
 迁移使用独立账号；运行账号不得更新不可变快照/版本。DB端口不映射公网。原型可以通过`python -m http.server 8000 --directory prototype`临时查看，不将该开发服务器当正式入口。
 

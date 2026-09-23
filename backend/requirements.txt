@@ -9,6 +9,11 @@ python-dotenv>=1.0.0
 websockets>=13.1
 python-multipart>=0.0.6
 
+# Persistence and migrations (PostgreSQL in live; SQLite is used by repository tests)
+SQLAlchemy>=2.0.41
+alembic>=1.13.0
+psycopg[binary]>=3.2.0
+
 # LangChain v1
 langchain>=1.0.0
 langchain-classic>=1.0.0
@@ -31,5 +36,5 @@ htmldocx>=0.0.6
 jinja2>=3.1.6
 
 # GPT-Researcher (install from root)
-# Run: pip install -e . from the project root
-# gpt-researcher>=0.14.4
+# Run: pip install -e . from the project root. The checked-in source is pinned
+# to commit 8da8d8f85d7124649bb059ce1b2106ed3d3f5ea5 (v0.14.7).

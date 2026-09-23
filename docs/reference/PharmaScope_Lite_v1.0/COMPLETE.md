@@ -1,5 +1,7 @@
 # PharmaScope Lite｜完整产品与工程文档
 
+> 实施更新（2026-09-23）：本文保留原设计包作为历史规格；当前代码、实测和外部阻塞以 [delivery/STATE.md](delivery/STATE.md) 与 [delivery/TEST_RESULTS.md](delivery/TEST_RESULTS.md) 为准，不以原 DEMO_READY 或本文示例推定已上线。
+
 **v1.0 · 2026-09-22 · GPT Researcher二开 · 4核8GB设计基线**
 
 本次交付为文档、合同和离线原型，不是已经运行的后端。真实依赖、模型、官方数据和服务器性能尚待M0及后续验收。

@@ -2,7 +2,16 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ReactNode, useState } from "react";
+import { ReactNode, useEffect, useState } from "react";
+import {
+  formatApiError,
+  getAuthMe,
+  IS_REPLAY_MODE,
+  logout as apiLogout,
+  AuthMe,
+  selectWorkspace,
+  PharmaApiError,
+} from "@/components/pharma/pharmaApi";
 
 export const navItems = [
   { href: "/", label: "工作台", icon: "⌂" },
@@ -31,6 +40,37 @@ type Props = {
 export default function PharmaScopeShell({ children, title, description, actions }: Props) {
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [auth, setAuth] = useState<AuthMe | null>(null);
+  const [authError, setAuthError] = useState("");
+  useEffect(() => {
+    getAuthMe()
+      .then(setAuth)
+      .catch((error) => setAuthError(formatApiError(error)));
+  }, []);
+  const membership =
+    auth?.memberships?.find(
+      (item) =>
+        item.workspace_id ===
+        (typeof window !== "undefined" ? sessionStorage.getItem("pharmascope_workspace") : null)
+    ) || auth?.memberships?.[0];
+  const workspaceName =
+    membership?.workspace_name ||
+    membership?.workspace?.name ||
+    (IS_REPLAY_MODE ? "PharmaScope 演示研究组" : "当前工作区");
+  const userName =
+    auth?.user?.display_name ||
+    auth?.user?.name ||
+    auth?.user?.email ||
+    (IS_REPLAY_MODE ? "演示研究员" : "未登录");
+  const modeLabel = !auth ? "模式待确认" : IS_REPLAY_MODE ? "REPLAY / DEMO" : "LIVE";
+  async function handleLogout() {
+    try {
+      await apiLogout();
+      window.location.href = "/login";
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "登出失败");
+    }
+  }
 
   return (
     <div className="ps-app">
@@ -44,63 +84,256 @@ export default function PharmaScopeShell({ children, title, description, actions
         </div>
         <div className="ps-workspace">
           <span>当前工作区</span>
-          <strong>示例研发中心 <span aria-hidden>⌄</span></strong>
+          <select
+            aria-label="切换工作区"
+            className="ps-input"
+            value={membership?.workspace_id || ""}
+            onChange={(e) => selectWorkspace(e.target.value)}
+          >
+            {auth?.memberships
+              .filter((item) => item.enabled !== false && item.workspace_id !== "demo-workspace")
+              .map((item) => (
+                <option key={item.workspace_id} value={item.workspace_id}>
+                  {item.workspace_name || item.workspace?.name || item.workspace_id}
+                </option>
+              ))}
+          </select>
         </div>
         <nav className="ps-nav">
           <div className="ps-nav-label">工作台</div>
           {navItems.slice(0, 5).map((item) => (
-            <Link key={item.href} href={item.href} className={`ps-nav-link ${isActive(pathname, item.href) ? "active" : ""}`} onClick={() => setSidebarOpen(false)}>
-              <span className="ps-nav-icon" aria-hidden>{item.icon}</span><span>{item.label}</span>
-              {item.href === "/events" && <em>3</em>}
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`ps-nav-link ${isActive(pathname, item.href) ? "active" : ""}`}
+              onClick={() => setSidebarOpen(false)}
+            >
+              <span className="ps-nav-icon" aria-hidden>
+                {item.icon}
+              </span>
+              <span>{item.label}</span>
             </Link>
           ))}
           <div className="ps-nav-label ps-nav-label-spaced">研究</div>
           {navItems.slice(5).map((item) => (
-            <Link key={item.href} href={item.href} className={`ps-nav-link ${isActive(pathname, item.href) ? "active" : ""}`} onClick={() => setSidebarOpen(false)}>
-              <span className="ps-nav-icon" aria-hidden>{item.icon}</span><span>{item.label}</span>
-              {item.href === "/inbox" && <em>2</em>}
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`ps-nav-link ${isActive(pathname, item.href) ? "active" : ""}`}
+              onClick={() => setSidebarOpen(false)}
+            >
+              <span className="ps-nav-icon" aria-hidden>
+                {item.icon}
+              </span>
+              <span>{item.label}</span>
             </Link>
           ))}
         </nav>
         <div className="ps-sidebar-bottom">
-          <div className="ps-demo-note"><strong>DEMO 模式</strong><span>数据仅用于界面演示，不代表真实医药事实。</span></div>
-          <Link href="/settings" className={`ps-nav-link ${isActive(pathname, "/settings") ? "active" : ""}`}><span className="ps-nav-icon" aria-hidden>⚙</span><span>来源与设置</span></Link>
-          <div className="ps-user"><div className="ps-avatar">研</div><div><strong>研究员</strong><small>reader · 示例工作区</small></div><span aria-hidden>⋮</span></div>
+          <div className={`ps-demo-note ${IS_REPLAY_MODE ? "" : "live"}`}>
+            <strong>{modeLabel}</strong>
+            <span>
+              {IS_REPLAY_MODE
+                ? "数据仅用于离线演示，不代表真实医药事实。"
+                : "数据来自已配置的真实 API 来源。"}
+            </span>
+          </div>
+          <Link
+            href="/workspace"
+            className={`ps-nav-link ${isActive(pathname, "/workspace") ? "active" : ""}`}
+          >
+            <span className="ps-nav-icon" aria-hidden>
+              ▦
+            </span>
+            <span>工作区与关联审核</span>
+          </Link>
+          <Link
+            href="/settings"
+            className={`ps-nav-link ${isActive(pathname, "/settings") ? "active" : ""}`}
+          >
+            <span className="ps-nav-icon" aria-hidden>
+              ⚙
+            </span>
+            <span>来源与设置</span>
+          </Link>
+          <div className="ps-user">
+            <div className="ps-avatar">{userName.slice(0, 1)}</div>
+            <div>
+              <strong>{userName}</strong>
+              <small>
+                {membership?.role || (IS_REPLAY_MODE ? "reader" : "未验证权限")} · {workspaceName}
+              </small>
+            </div>
+            <button type="button" aria-label="退出登录" onClick={handleLogout}>
+              ↪
+            </button>
+          </div>
         </div>
       </aside>
 
       <div className="ps-main-wrap">
         <header className="ps-topbar">
-          <button className="ps-menu-button" onClick={() => setSidebarOpen((v) => !v)} aria-label="打开导航">☰</button>
-          <div className="ps-breadcrumb"><span>示例研发中心</span><b>/</b><strong>{title || "工作台"}</strong></div>
+          <button
+            className="ps-menu-button"
+            onClick={() => setSidebarOpen((v) => !v)}
+            aria-label="打开导航"
+          >
+            ☰
+          </button>
+          <div className="ps-breadcrumb">
+            <span>{workspaceName}</span>
+            <b>/</b>
+            <strong>{title || "工作台"}</strong>
+          </div>
           <div className="ps-top-actions">
-            <label className="ps-global-search"><span aria-hidden>⌕</span><input aria-label="全局搜索" placeholder="搜索药物、试验或文献" /><kbd>⌘ K</kbd></label>
-            <span className="ps-mode-badge"><i /> DEMO</span>
-            <button className="ps-icon-button" aria-label="通知">◌<b>2</b></button>
-            <div className="ps-top-avatar">研</div>
+            <Link className="ps-text-link" href="/drugs">
+              搜索药物档案
+            </Link>
+            <span className={`ps-mode-badge ${IS_REPLAY_MODE ? "" : "live"}`}>
+              <i /> {modeLabel}
+            </span>
+            <Link href="/inbox" className="ps-icon-button" aria-label="通知">
+              ◌
+            </Link>
+            <div className="ps-top-avatar">{userName.slice(0, 1)}</div>
           </div>
         </header>
 
         <main className="ps-content">
-          <div className="ps-mode-banner"><span><i aria-hidden>ⓘ</i> 当前为 DEMO 模式 · 所有示例对象均为虚构资料</span><Link href="/settings">查看数据范围与来源 →</Link></div>
-          {(title || description || actions) && <div className="ps-page-head"><div><h1>{title}</h1>{description && <p>{description}</p>}</div>{actions && <div className="ps-page-actions">{actions}</div>}</div>}
+          <div className={`ps-mode-banner ${IS_REPLAY_MODE ? "" : "live"}`}>
+            <span>
+              <i aria-hidden>ⓘ</i>{" "}
+              {!auth
+                ? "连接 API 以确认运行模式和权限"
+                : IS_REPLAY_MODE
+                  ? "当前为 REPLAY / DEMO 模式 · 所有对象均为虚构资料"
+                  : "当前为 LIVE 模式 · 数据由 API 和已配置来源提供"}
+            </span>
+            <Link href="/settings">查看数据范围与来源 →</Link>
+          </div>
+          {authError && !IS_REPLAY_MODE && (
+            <div className="ps-callout amber" role="status">
+              身份状态暂不可用：{authError}。
+              <Link href="/login" className="ps-text-link">
+                前往登录
+              </Link>
+            </div>
+          )}
+          {(title || description || actions) && (
+            <div className="ps-page-head">
+              <div>
+                <h1>{title}</h1>
+                {description && <p>{description}</p>}
+              </div>
+              {actions && <div className="ps-page-actions">{actions}</div>}
+            </div>
+          )}
           {children}
         </main>
       </div>
-      {sidebarOpen && <button className="ps-sidebar-overlay" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} />}
+      {sidebarOpen && (
+        <button
+          className="ps-sidebar-overlay"
+          aria-label="关闭导航"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
-export function StatusBadge({ status, tone = "neutral" }: { status: string; tone?: "neutral" | "success" | "warning" | "danger" | "info" }) {
-  const icon = tone === "success" ? "✓" : tone === "warning" ? "!" : tone === "danger" ? "×" : tone === "info" ? "i" : "•";
-  return <span className={`ps-status ${tone}`}><i aria-hidden>{icon}</i>{status}</span>;
+export function StatusBadge({
+  status,
+  tone = "neutral",
+}: {
+  status: string;
+  tone?: "neutral" | "success" | "warning" | "danger" | "info";
+}) {
+  const icon =
+    tone === "success"
+      ? "✓"
+      : tone === "warning"
+        ? "!"
+        : tone === "danger"
+          ? "×"
+          : tone === "info"
+            ? "i"
+            : "•";
+  return (
+    <span className={`ps-status ${tone}`}>
+      <i aria-hidden>{icon}</i>
+      {status}
+    </span>
+  );
 }
 
-export function MetricCard({ label, value, detail, icon, tone = "blue" }: { label: string; value: ReactNode; detail: string; icon: string; tone?: string }) {
-  return <section className="ps-card ps-metric"><div className={`ps-metric-icon ${tone}`} aria-hidden>{icon}</div><span>{label}</span><strong>{value}</strong><small>{detail}</small></section>;
+export function MetricCard({
+  label,
+  value,
+  detail,
+  icon,
+  tone = "blue",
+}: {
+  label: string;
+  value: ReactNode;
+  detail: string;
+  icon: string;
+  tone?: string;
+}) {
+  return (
+    <section className="ps-card ps-metric">
+      <div className={`ps-metric-icon ${tone}`} aria-hidden>
+        {icon}
+      </div>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </section>
+  );
 }
 
-export function EmptyState({ title, detail, action }: { title: string; detail: string; action?: ReactNode }) {
-  return <div className="ps-empty"><div className="ps-empty-icon" aria-hidden>⌁</div><h3>{title}</h3><p>{detail}</p>{action}</div>;
+export function EmptyState({
+  title,
+  detail,
+  action,
+}: {
+  title: string;
+  detail: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="ps-empty">
+      <div className="ps-empty-icon" aria-hidden>
+        ⌁
+      </div>
+      <h3>{title}</h3>
+      <p>{detail}</p>
+      {action}
+    </div>
+  );
+}
+
+export function ApiErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
+  const message = formatApiError(error);
+  return (
+    <div className="ps-empty ps-error-state" role="alert">
+      <div className="ps-empty-icon" aria-hidden>
+        !
+      </div>
+      <h3>数据加载失败</h3>
+      <p>{message}</p>
+      {error instanceof PharmaApiError && error.status === 401 && (
+        <Link href="/login" className="ps-btn primary">
+          前往登录
+        </Link>
+      )}
+      <button
+        type="button"
+        className="ps-btn"
+        onClick={onRetry || (() => window.location.reload())}
+      >
+        重试
+      </button>
+    </div>
+  );
 }

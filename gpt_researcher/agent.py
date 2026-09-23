@@ -80,6 +80,9 @@ class GPTResearcher:
         mcp_configs: list[dict] | None = None,
         mcp_max_iterations: int | None = None,
         mcp_strategy: str | None = None,
+        research_conductor_factory=None,
+        report_generator_factory=None,
+        lite_profile: bool = False,
         **kwargs
     ):
         """
@@ -138,7 +141,7 @@ class GPTResearcher:
         self.kwargs = kwargs
         self.query = query
         self.report_type = report_type
-        self.cfg = Config(config_path)
+        self.cfg = Config(config_path, lite_profile=True) if lite_profile else Config(config_path)
         self.cfg.set_verbose(verbose)
         self.report_source = report_source if report_source else getattr(self.cfg, 'report_source', None)
         self.report_format = report_format
@@ -167,6 +170,26 @@ class GPTResearcher:
         self._current_step: str = "general"
         self.log_handler = log_handler
         self.prompt_family = get_prompt_family(prompt_family or self.cfg.prompt_family, self.cfg)
+
+        # PharmaScope's pinned extension: retain the public research/report
+        # lifecycle, but inject the domain conductor before optional browser,
+        # embedding and open-web tools are initialized. No global monkeypatch.
+        if lite_profile:
+            if not research_conductor_factory or not report_generator_factory or not (agent and role):
+                raise ValueError("lite_profile requires conductor, writer and explicit agent/role")
+            if report_type == ReportType.DeepResearch.value or mcp_configs:
+                raise ValueError("lite_profile does not permit deep research or MCP")
+            self.mcp_configs = None
+            self.mcp_strategy = "disabled"
+            self.retrievers = []
+            self.memory = self.context_manager = self.scraper_manager = self.source_curator = None
+            self.deep_researcher = self.image_generator = None
+            self.available_images = []
+            self._research_id = ""
+            self.encoding = "utf-8"
+            self.research_conductor = research_conductor_factory(self)
+            self.report_generator = report_generator_factory(self)
+            return
         
         # Process MCP configurations if provided
         self.mcp_configs = mcp_configs

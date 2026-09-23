@@ -1,0 +1,119 @@
+name: pharmascope
+
+services:
+  db:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pharma}
+      POSTGRES_DB: ${POSTGRES_DB:-pharma}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment file}
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "work_mem=4MB", "-c", "max_connections=40"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    init: true
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    restart: unless-stopped
+    cpus: 0.75
+    mem_limit: 1536m
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    env_file:
+      - ${PHARMA_ENV_FILE:?Use deploy/compose.sh ENV_FILE to choose the runtime configuration}
+    environment:
+      PHARMA_DATABASE_URL: ${PHARMA_DATABASE_URL:?Set PHARMA_DATABASE_URL in the environment file}
+      DATABASE_URL: ${PHARMA_DATABASE_URL:?Set PHARMA_DATABASE_URL in the environment file}
+    command: ["uvicorn", "backend.pharma_scope_app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    depends_on:
+      db:
+        condition: service_healthy
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    init: true
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    restart: unless-stopped
+    cpus: 0.75
+    mem_limit: 768m
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    env_file:
+      - ${PHARMA_ENV_FILE:?Use deploy/compose.sh ENV_FILE to choose the runtime configuration}
+    environment:
+      PHARMA_DATABASE_URL: ${PHARMA_DATABASE_URL:?Set PHARMA_DATABASE_URL in the environment file}
+      DATABASE_URL: ${PHARMA_DATABASE_URL:?Set PHARMA_DATABASE_URL in the environment file}
+    command: ["python", "-m", "backend.worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "backend.worker", "--healthcheck"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+    init: true
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    restart: unless-stopped
+    cpus: 2.0
+    mem_limit: 3072m
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.frontend
+      args:
+        NEXT_PUBLIC_PHARMA_API_URL: ${NEXT_PUBLIC_PHARMA_API_URL:-}
+        NEXT_PUBLIC_PHARMA_WORKSPACE_ID: ${NEXT_PUBLIC_PHARMA_WORKSPACE_ID:-dee59b72-2cb2-5255-934c-b44a3fd8911c}
+        NEXT_PUBLIC_PHARMA_RUNTIME_MODE: ${NEXT_PUBLIC_PHARMA_RUNTIME_MODE:-live}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${PHARMA_WEB_PORT:-18181}:80"
+    init: true
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    restart: unless-stopped
+    cpus: 0.25
+    mem_limit: 192m
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    env_file:
+      - ${PHARMA_ENV_FILE:?Use deploy/compose.sh ENV_FILE to choose the runtime configuration}
+    environment:
+      PHARMA_DATABASE_URL: ${PHARMA_DATABASE_URL:?Set PHARMA_DATABASE_URL in the environment file}
+      DATABASE_URL: ${PHARMA_DATABASE_URL:?Set PHARMA_DATABASE_URL in the environment file}
+    command: ["alembic", "upgrade", "head"]
+    profiles: ["ops"]
+    cpus: 0.5
+    mem_limit: 512m
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

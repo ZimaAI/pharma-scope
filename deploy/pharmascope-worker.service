@@ -1,0 +1,25 @@
+[Unit]
+Description=PharmaScope Lite research worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zima
+Group=zima
+WorkingDirectory=/home/zima/Develop/Projects/pharma-scope
+EnvironmentFile=/etc/pharmascope/pharmascope.env
+ExecStart=/home/zima/Develop/Projects/pharma-scope/.venv/bin/python -m backend.worker
+Restart=always
+RestartSec=5
+TimeoutStopSec=35
+UMask=0077
+TasksMax=128
+SyslogIdentifier=pharmascope-worker
+NoNewPrivileges=true
+PrivateTmp=true
+MemoryMax=3G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target
