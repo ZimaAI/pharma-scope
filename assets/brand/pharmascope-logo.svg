@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 470 80" role="img" aria-labelledby="title">
+  <title id="title">PharmaScope</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3975FF"/>
+      <stop offset="1" stop-color="#2549CA"/>
+    </linearGradient>
+  </defs>
+  <rect y="8" width="64" height="64" rx="15" fill="url(#tile)"/>
+  <circle cx="28" cy="36" r="16" fill="none" stroke="#fff" stroke-width="4.5"/>
+  <path d="m40 48 11 11" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round"/>
+  <path d="m20 40 8-10 9 7" fill="none" stroke="#A7F1FF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="20" cy="40" r="3.4" fill="#fff"/>
+  <circle cx="28" cy="30" r="3.4" fill="#fff"/>
+  <circle cx="37" cy="37" r="3.4" fill="#fff"/>
+  <text x="83" y="53" fill="#17243B" font-family="Inter, Arial, sans-serif" font-size="40" font-weight="700" letter-spacing="-1.5">PharmaScope</text>
+</svg>

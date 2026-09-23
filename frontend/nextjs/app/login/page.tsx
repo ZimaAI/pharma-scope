@@ -50,7 +50,7 @@ export default function LoginPage() {
   return (
     <main className="ps-login">
       <section className="ps-login-card ps-card">
-        <div className="ps-brand-mark">P</div>
+        <img className="ps-brand-mark" src="/brand/pharmascope-mark.svg" alt="PharmaScope 标志" width="36" height="36" />
         <span className="ps-kicker">
           PHARMASCOPE LITE · {replay === null ? "模式待确认" : replay ? "REPLAY / DEMO" : "LIVE"}
         </span>

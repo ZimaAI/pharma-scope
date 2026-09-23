@@ -97,7 +97,7 @@ export default function PharmaScopeShell({ children, title, description, actions
     <div className={`ps-app ${guest ? "ps-guest" : ""}`}>
       <aside className={`ps-sidebar ${sidebarOpen ? "open" : ""}`} aria-label="主导航">
         <div className="ps-brand">
-          <div className="ps-brand-mark">P</div>
+          <img className="ps-brand-mark" src="/brand/pharmascope-mark.svg" alt="" width="36" height="36" />
           <div>
             <strong>PharmaScope</strong>
             <small>LITE · 研发情报工作台</small>

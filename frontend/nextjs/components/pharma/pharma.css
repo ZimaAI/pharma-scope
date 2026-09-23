@@ -23,7 +23,7 @@
 .ps-app button:focus-visible, .ps-app a:focus-visible, .ps-app input:focus-visible, .ps-app select:focus-visible, .ps-app textarea:focus-visible { outline: 2px solid var(--ps-primary); outline-offset: 2px; }
 .ps-sidebar { width: 232px; position: fixed; inset: 0 auto 0 0; z-index: 50; background: var(--ps-sidebar); color: #e6ecf7; padding: 26px 15px 16px; display: flex; flex-direction: column; }
 .ps-brand { display: flex; gap: 10px; align-items: center; padding: 0 7px; margin-bottom: 27px; }
-.ps-brand-mark { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; color: #fff; background: var(--ps-primary); font-weight: 700; font-size: 18px; box-shadow: inset 0 0 0 1px #ffffff2c; }
+.ps-brand-mark { width: 36px; height: 36px; display: block; flex: none; border-radius: 9px; }
 .ps-brand strong { display: block; font-size: 16px; letter-spacing: -.4px; line-height: 1.25; }
 .ps-brand small { display: block; color: #93a5c4; font-size: 9px; letter-spacing: .9px; margin-top: 2px; }
 .ps-workspace { border: 1px solid #ffffff18; border-radius: 8px; padding: 9px 11px; margin-bottom: 21px; background: #ffffff06; }
