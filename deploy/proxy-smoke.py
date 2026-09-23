@@ -59,10 +59,12 @@ with tempfile.TemporaryDirectory(prefix="pharmascope-proxy-") as directory:
                 time.sleep(.1)
         else:
             raise RuntimeError("isolated Nginx failed to start")
-        for endpoint in ("/healthz", "/readyz", "/"):
+        for endpoint in ("/healthz", "/readyz", "/", "/drugs", "/drugs/", "/reports", "/login"):
             with opener.open(origin + endpoint, timeout=5) as response:
                 body = response.read().decode()
                 assert response.status == 200
+                if endpoint == "/drugs/":
+                    assert response.url == origin + "/drugs", "directory route did not resolve to its exported HTML"
                 if endpoint == "/":
                     asset = re.search(r'src="([^" ]+\.js[^" ]*)"', body)
                     assert asset, "static JS reference missing"
